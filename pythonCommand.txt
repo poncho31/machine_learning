@@ -1,0 +1,13 @@
+# Install
+    1) pip install -r requirements.txt
+
+    ou dans un virtualenv
+
+    2) python -m venv .venv
+    .venv\Scripts\activate        # Windows
+    # source .venv/bin/activate   # Linux/Mac
+
+    pip install -r requirements.txt
+
+
+
