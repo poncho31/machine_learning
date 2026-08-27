@@ -1,2 +1,8 @@
 .venv
 liste_pdf
+storage
+
+# Générés par l'outil (contiennent des chemins propres à la machine)
+automations.json
+config.json
+*_classification.json

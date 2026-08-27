@@ -1,0 +1,4 @@
+# Optionnel : active le vrai glisser-déposer de fichiers depuis l'Explorateur
+# dans l'interface graphique (ml_pdf_gui.py). Sans ce paquet, l'interface
+# reste utilisable via les boutons "Ajouter des fichiers.../Ajouter un dossier...".
+tkinterdnd2>=0.4.2
