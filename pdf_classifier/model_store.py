@@ -58,6 +58,18 @@ def model_manifest_path(model_path: str) -> str:
     return os.path.join(directory, f"{stem}.json")
 
 
+def model_digest_path(model_path: str) -> str:
+    """Résumé condensé du corpus d'entraînement de ce modèle (extrait +
+    mots-clés par document, PAS le texte intégral — voir
+    `discover._write_corpus_digest`), à côté du .pkl (même nom, suffixe
+    `_digest.json`). Pensé pour être relu par un futur modèle d'IA local
+    (proposer un nom de catégorie, résumer un fichier) sans avoir à
+    ré-extraire les documents d'origine."""
+    directory = os.path.dirname(os.path.abspath(model_path)) or "."
+    stem = os.path.splitext(os.path.basename(model_path))[0]
+    return os.path.join(directory, f"{stem}_digest.json")
+
+
 def _model_dir(model_path: str) -> str:
     return os.path.dirname(os.path.abspath(model_path)) or "."
 

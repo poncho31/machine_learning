@@ -13,11 +13,25 @@ from . import model_store
 from .config import get_config
 from .extraction import ExtractedDocument, extract_documents
 from .features import engine_from_state
-from .utils import dispatch_file, write_json_atomic
+from .formats import SUPPORTED_EXTENSIONS
+from .utils import content_hash, dispatch_file, write_json_atomic
 
 
 def uncertain_category() -> str:
     return get_config().uncertain_category_name
+
+
+def model_extensions(bundle: dict) -> tuple[str, ...]:
+    """Types de fichiers utilisés pour entraîner ce modèle (voir
+    `discover._build_bundle`, `training_params`), pour qu'une classification
+    ou une automatisation ne recherche que ces types-là plutôt que tous les
+    formats pris en charge — un modèle entraîné uniquement sur des `.pdf` ne
+    doit pas se mettre à considérer des `.docx` lors de son utilisation.
+    Retombe sur tous les formats pris en charge si l'information n'est pas
+    disponible (modèle entraîné avant l'ajout de ce champ, ou modèle
+    supervisé via la CLI)."""
+    extensions = bundle.get("training_params", {}).get("extensions")
+    return tuple(extensions) if extensions else SUPPORTED_EXTENSIONS
 
 
 def unreadable_category() -> str:
@@ -68,7 +82,11 @@ def known_categories(bundle: dict) -> list[str]:
     """Catégories connues du modèle, pour peupler une liste déroulante."""
     if bundle["mode"] == "supervised":
         return list(bundle["label_names"])
-    return list(bundle["cluster_names"].values())
+    names = list(bundle["cluster_names"].values())
+    for extra in bundle.get("confirmed_overrides", {}).values():
+        if extra not in names:
+            names.append(extra)
+    return names
 
 
 def load_model_for_prediction(model_path: str) -> tuple[dict, object]:
@@ -94,8 +112,19 @@ def classify_documents(
     if readable:
         vectors = engine.transform([d.text for d in readable])
         labels, confidences = predict_labels(bundle, vectors)
+        overrides = bundle.get("confirmed_overrides", {})
         for doc, label, confidence in zip(readable, labels, confidences):
-            category = label if confidence >= threshold else uncertain_category()
+            # Un document dont le contenu correspond exactement à une
+            # correction déjà confirmée à la main (onglet Classification,
+            # "Améliorer le modèle avec ces documents") retrouve toujours sa
+            # catégorie confirmée : le clustering K-Means, purement non
+            # supervisé, ne garantit pas de le reclasser au même endroit
+            # sinon (voir `_merge_confirmed_overrides` dans discover.py).
+            override = overrides.get(content_hash(doc.text)) if doc.text.strip() else None
+            if override is not None:
+                category, confidence = override, 1.0
+            else:
+                category = label if confidence >= threshold else uncertain_category()
             results[doc.path] = {"category": category, "confidence": float(confidence)}
 
     for doc in unreadable:
@@ -115,7 +144,7 @@ def classify(
 ) -> dict:
     bundle, engine = load_model_for_prediction(model_path)
 
-    documents = extract_documents(input_dir, recursive=recursive)
+    documents = extract_documents(input_dir, recursive=recursive, extensions=model_extensions(bundle))
     if not documents:
         raise ValueError(f"Aucun document pris en charge trouvé dans {input_dir}")
 

@@ -11,6 +11,16 @@ from dataclasses import dataclass
 
 from .formats import SUPPORTED_EXTENSIONS, extract_text_for
 
+# Dossiers de bookkeeping interne à ne jamais reprendre comme documents
+# d'entraînement lors d'un scan récursif : `_backup` (doublons mis de côté
+# par la détection de doublons, voir `utils.move_files_to_local_backup`) et
+# les dossiers d'historique de modèle (`model_store._HISTORY_DIR_NAMES`).
+# Sans cette exclusion, un dossier source récursif qui contient (ou dont un
+# sous-dossier contient) un `_backup/` réanalyse indéfiniment les mêmes
+# fichiers à chaque nouvel entraînement — précisément les fichiers qu'on a
+# voulu mettre de côté.
+_IGNORED_SCAN_DIR_NAMES = {"_backup", "pkl_history", "json_history", "dataset_history", "__pycache__"}
+
 
 @dataclass
 class ExtractedDocument:
@@ -56,7 +66,8 @@ def list_documents(
 
     if recursive:
         matches_list = []
-        for root, _dirs, filenames in os.walk(directory):
+        for root, dirs, filenames in os.walk(directory):
+            dirs[:] = [d for d in dirs if d not in _IGNORED_SCAN_DIR_NAMES and not d.startswith(".")]
             matches_list.extend(_canonical(os.path.join(root, f)) for f in filenames if matches(f))
         return sorted(matches_list)
     return sorted(_canonical(os.path.join(directory, f)) for f in os.listdir(directory) if matches(f))
@@ -76,12 +87,21 @@ def extract_documents_from_paths(paths: list[str]) -> list[ExtractedDocument]:
     return documents
 
 
-def extract_documents(directory: str, recursive: bool = False, progress=None) -> list[ExtractedDocument]:
+def extract_documents(
+    directory: str,
+    recursive: bool = False,
+    progress=None,
+    extensions: tuple[str, ...] = SUPPORTED_EXTENSIONS,
+) -> list[ExtractedDocument]:
     """`progress`, si fourni, reçoit un message avant le début de
     l'extraction puis à intervalles réguliers pendant qu'elle avance — utile
     pour un gros dossier, où l'extraction seule peut prendre du temps et
-    donnerait sinon l'impression que l'outil est figé."""
-    paths = list_documents(directory, recursive=recursive)
+    donnerait sinon l'impression que l'outil est figé.
+
+    `extensions` restreint les fichiers pris en compte (voir l'onglet
+    Entraînement, sélection des types de fichiers à inclure) : par défaut
+    tous les formats pris en charge."""
+    paths = list_documents(directory, recursive=recursive, extensions=extensions)
     total = len(paths)
     if progress and total:
         progress(f"Extraction du texte de {total} document(s)...")

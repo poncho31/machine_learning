@@ -1,0 +1,3 @@
+# Optionnel : nécessaire uniquement pour compiler un exécutable autonome
+# (voir build.ps1 pour Windows, build.sh pour Linux).
+pyinstaller>=6.0

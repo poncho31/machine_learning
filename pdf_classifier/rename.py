@@ -39,6 +39,17 @@ def rename_categories(model_path: str, renames: dict[str, str]) -> dict:
             cluster_names[cluster_id] = new_name
     bundle["cluster_names"] = cluster_names
 
+    # Les catégories confirmées à la main (voir `discover._merge_confirmed_overrides`)
+    # ne passent pas forcément par `cluster_names` (une correction peut créer
+    # une catégorie qu'aucun cluster K-Means n'a nommée) : sans cette mise à
+    # jour, un renommage ou une suppression ici serait silencieusement annulé
+    # à la prochaine classification ou amélioration du modèle.
+    confirmed_overrides = bundle.get("confirmed_overrides")
+    if confirmed_overrides:
+        bundle["confirmed_overrides"] = {
+            digest: renames.get(name, name) for digest, name in confirmed_overrides.items()
+        }
+
     model_store.snapshot_model(model_path)
     model_store.save_bundle(bundle, model_path)
 

@@ -49,36 +49,42 @@ La fenêtre s'ouvre sur cinq onglets, dans cet ordre : **Classification** (à ga
 
 Aucun tri manuel n'est nécessaire : on pointe un dossier de documents **en vrac**, l'outil détecte les catégories tout seul par similarité entre documents (les factures se regroupent avec les factures, les contrats avec les contrats, etc., sans qu'on ait besoin de le lui dire à l'avance).
 
-1. **Choisir le dossier de documents à analyser** — un seul dossier contenant tous vos fichiers en vrac (`Parcourir...`).
-2. **Choisir le moteur d'analyse** :
-   - **TF-IDF** (par défaut) — compare les documents par les mots qu'ils ont en commun. Rapide, disponible immédiatement, aucun téléchargement. Très efficace quand chaque catégorie a un vocabulaire distinct (factures, contrats, relevés fiscaux...).
-   - **Embeddings** (sémantique) — compare les documents par le *sens* des phrases plutôt que les mots exacts, via un modèle de langage pré-entraîné à choisir dans une liste déroulante, **du plus léger au plus lourd** :
+**Cas d'usage** — en haut de l'onglet, un menu déroulant propose des points de départ pour des besoins courants : sélectionner l'un d'eux pré-remplit les types de fichiers et le moteur adaptés.
 
-     | Modèle | Poids | Langue | Usage conseillé |
-     |---|---|---|---|
-     | `all-MiniLM-L6-v2` | ~90 Mo | anglais surtout | par défaut, le plus rapide |
-     | `all-MiniLM-L12-v2` | ~120 Mo | anglais surtout | un peu plus précis, reste rapide |
-     | `paraphrase-multilingual-MiniLM-L12-v2` | ~470 Mo | multilingue (français OK) | texte libre en français, formulations variées |
-     | `all-mpnet-base-v2` | ~420 Mo | anglais surtout | meilleure qualité en anglais, texte libre |
-     | `paraphrase-multilingual-mpnet-base-v2` | ~970 Mo | multilingue (français OK) | la meilleure qualité multilingue, le plus lent |
+| Cas d'usage | Statut | Détail |
+|---|---|---|
+| Classeur de documents | Disponible | Mode par défaut de l'onglet (tous types de fichiers, TF-IDF) |
+| Trieur d'emails | Disponible | Limite aux formats `.eml`/`.msg`, embeddings multilingues — renommez ensuite les catégories détectées dans Transformer les données pour imposer des catégories fixes (ex. spam / non-spam) |
+| Extracteur de factures | À venir | Nécessiterait un modèle d'extraction de champs (NER) entraîné sur des factures annotées (ex. SROIE, CORD) — capacité différente de la catégorisation, pas encore implémentée |
+| Analyseur de contrats | À venir | Nécessiterait un modèle de détection de clauses (type BERT finement ajusté sur un jeu de données comme CUAD) — pas encore implémenté |
+| Détecteur de doublons / plagiat | À venir | Nécessiterait une recherche de similarité par embeddings à l'échelle d'une base documentaire entière — pas encore implémenté |
 
-     Chaque modèle se télécharge une seule fois puis fonctionne hors-ligne.
-   - L'explication complète des deux moteurs, et la description du modèle d'embeddings sélectionné, sont aussi affichées directement dans l'onglet.
+1. **Choisir le dossier de documents à analyser** — un seul dossier contenant tous vos fichiers en vrac (`Parcourir...`). La case **"Inclure les sous-dossiers"** (cochée par défaut) fait aussi remonter les documents rangés dans des sous-dossiers de ce dossier — y compris, volontairement, le dossier `dataset/` d'un autre modèle si vous l'utilisez comme dossier source (chaînage de modèles). Les dossiers `_backup` (doublons mis de côté, voir plus bas), `pkl_history`, `json_history` et `dataset_history` sont toujours ignorés lors d'un scan récursif, pour ne pas ré-analyser indéfiniment les mêmes fichiers mis de côté ou archivés. Ce même réglage (récursif ou non) est mémorisé dans le modèle et repris automatiquement par "Améliorer le modèle" (onglet Classification) et par un nouveau ré-entraînement basé sur ce modèle.
+2. **Choisir les types de fichiers à inclure** — cases à cocher groupées par famille (Documents, Texte et données, Balisage, Email, Bureautique). Toutes cochées par défaut (tous les formats pris en charge) ; décochez pour restreindre à un seul type, plusieurs, ou tout autre sous-ensemble. Utile par exemple pour n'entraîner que sur des emails, ou exclure des formats de données structurées (`.json`, `.csv`...) qui ne sont pas de vrais "documents".
+3. **"2. Moteur d'analyse"** — un menu de **préréglages** fixe d'un coup le moteur et tous ses paramètres pour CET entraînement précis (sans toucher aux valeurs par défaut de Paramètres) ; chaque champ reste ensuite modifiable individuellement pour affiner. Le bouton **"? Explications"** ouvre une fenêtre dédiée avec le détail complet de chaque moteur, de chaque modèle d'embeddings et de chaque préréglage — rien n'encombre le formulaire par défaut.
 
-   **TF-IDF ou embeddings : lequel choisir ?** Mesuré sur un vrai jeu de test (documents très gabarités, même mise en page et vocabulaire quasi identique d'un exemplaire à l'autre — factures d'un même fournisseur, fiches de paie, relevés d'un même organisme...) : dans ce cas, les embeddings n'apportent **aucun gain**, y compris un modèle multilingue sur des documents en français — ce qui varie d'un exemplaire à l'autre y est numérique (dates, montants), pas sémantique, donc la compréhension du sens n'aide pas. **TF-IDF reste le meilleur choix par défaut** sur ce type de documents administratifs très gabarités : gratuit, instantané, aucun téléchargement. Réservez les embeddings — et en particulier les modèles multilingues, plus lourds — à un corpus **réellement hétérogène en texte libre** (contrats de nature variée, courriers, rapports), où deux documents d'une même catégorie peuvent être formulés très différemment sans partager le même vocabulaire exact.
+   | Préréglage | Moteur | Quand l'utiliser |
+   |---|---|---|
+   | Par défaut (valeurs de Paramètres) | TF-IDF | Aucun réglage particulier, reprend l'onglet Paramètres |
+   | Documents très gabarités (même modèle) | TF-IDF | Factures d'un même fournisseur, fiches de paie d'une même personne — peu de catégories attendues |
+   | Mélange de plusieurs types de documents | TF-IDF | Factures + contrats + fiches de paie mélangés — vocabulaire élargi |
+   | Gros volume de documents, priorité à la vitesse | TF-IDF | Vocabulaire réduit, mots seuls — rapide sur un très grand nombre de documents |
+   | Exploration permissive | TF-IDF | Seuils très bas pour tout faire ressortir, à trier ensuite dans Transformer les données |
+   | Texte libre, léger et rapide (anglais) | Embeddings `all-MiniLM-L6-v2` | Premier essai en embeddings, sans attendre |
+   | Texte libre, un peu plus précis (anglais) | Embeddings `all-MiniLM-L12-v2` | Un peu plus précis que L6, reste rapide |
+   | Texte libre en français, formulations variées | Embeddings `paraphrase-multilingual-MiniLM-L12-v2` | Contrats variés, courriers, rapports en français |
+   | Texte libre, meilleure qualité (anglais) | Embeddings `all-mpnet-base-v2` | Meilleure qualité en anglais, plus lent |
+   | Texte libre multilingue, meilleure qualité (lourd) | Embeddings `paraphrase-multilingual-mpnet-base-v2` | La meilleure qualité multilingue disponible, le plus lent |
+
+   Les modèles d'embeddings se téléchargent une seule fois (~90 Mo à ~970 Mo selon le modèle) puis fonctionnent hors-ligne.
+
+   **TF-IDF ou embeddings : lequel choisir ?** Mesuré sur un vrai jeu de test (documents très gabarités, même mise en page et vocabulaire quasi identique d'un exemplaire à l'autre — factures d'un même fournisseur, fiches de paie, relevés d'un même organisme...) : dans ce cas, les embeddings n'apportent **aucun gain**, y compris un modèle multilingue sur des documents en français — ce qui varie d'un exemplaire à l'autre y est numérique (dates, montants), pas sémantique, donc la compréhension du sens n'aide pas. **TF-IDF reste le meilleur choix par défaut** sur ce type de documents administratifs très gabarités : gratuit, instantané, aucun téléchargement. Réservez les embeddings — et en particulier les modèles multilingues, plus lourds — à un corpus **réellement hétérogène en texte libre** (contrats de nature variée, courriers, rapports), où deux documents d'une même catégorie peuvent être formulés très différemment sans partager le même vocabulaire exact. Détail complet dans la fenêtre "? Explications".
 
    **Important — le score qui décide s'il y a "assez" de catégories n'a pas la même échelle selon le moteur.** TF-IDF opère dans un espace de mots très creux et de grande dimension où le score de silhouette (qui mesure la qualité d'un découpage) reste structurellement bas — mesuré sur un corpus de test à 3 catégories réellement distinctes : ~0.03 pour TF-IDF contre ~0.19 pour les embeddings, sur le **même découpage correct**. Il n'existe donc pas de seuil unique parfait pour les deux moteurs : un réglage assez permissif pour laisser TF-IDF détecter de vraies catégories laissera parfois passer, sur un dossier réellement homogène, un découpage un peu trop fin — c'est une limite connue, pas un bug, et l'onglet Transformer les données reste le moyen le plus fiable de corriger ce cas ponctuellement (fusionner des catégories en trop).
-3. **(Optionnel) Ajuster les paramètres avancés du moteur** — repliés sous un préréglage par défaut, ces champs permettent de configurer, pour CET entraînement précis (sans toucher aux valeurs par défaut de Paramètres) : le nombre de catégories min/max à essayer, le score de silhouette minimal et le nombre minimal de documents par catégorie pour accepter un découpage, et (en TF-IDF) la taille du vocabulaire et des n-grammes. Un menu de **préréglages** couvre les cas d'usage courants :
 
-   | Préréglage | Quand l'utiliser |
-   |---|---|
-   | Par défaut (valeurs de Paramètres) | Aucun réglage particulier, reprend l'onglet Paramètres |
-   | Documents très gabarités (même modèle) | Factures d'un même fournisseur, fiches de paie d'une même personne — TF-IDF, peu de catégories attendues |
-   | Documents hétérogènes en texte libre | Contrats variés, courriers, rapports — embeddings multilingues |
-   | Mélange de plusieurs types de documents | Factures + contrats + fiches de paie mélangés — TF-IDF, vocabulaire élargi |
-   | Exploration permissive | Seuils très bas pour tout faire ressortir, à trier ensuite dans Transformer les données |
-
-   Choisir un préréglage remplit tous les champs d'un coup ; chaque champ reste modifiable individuellement ensuite pour affiner.
+   Deux cases à cocher complètent les paramètres avancés :
+   - **Noms de catégorie plus naturels (KeyBERT)** (cochée par défaut) — au lieu d'assembler simplement les mots les mieux pondérés en TF-IDF, [KeyBERT](https://github.com/MaartenGr/KeyBERT) choisit les mots/groupes de mots les plus proches sémantiquement du sens global de la catégorie (via le modèle d'embeddings `all-MiniLM-L6-v2`, déjà utilisé ailleurs dans l'outil — aucun téléchargement supplémentaire), avec diversification pour éviter des variantes d'un même mot. Se replie automatiquement sur le nommage TF-IDF si le paquet optionnel `keybert` n'est pas installé (`pip install -r requirements-embeddings.txt`).
+   - **Détecter les documents en double** (cochée par défaut) — à partir des mêmes vecteurs déjà calculés pour le regroupement (aucun calcul supplémentaire lourd), signale les paires de documents quasi identiques (similarité ≥ 97 %) dans le journal et dans le résumé du corpus (voir plus bas). Désactivé automatiquement au-delà de 4000 documents pour éviter un calcul trop long. Si des doublons sont trouvés, une fenêtre les liste à la fin de l'entraînement et propose de les déplacer vers un dossier **`_backup`** créé à côté de leur dossier d'origine — jamais une suppression définitive, toujours récupérables au besoin. Un exemplaire de chaque groupe de quasi-doublons est toujours conservé.
 4. **(Optionnel) Choisir un modèle existant à améliorer** — au lieu de repartir de zéro, on peut sélectionner un `model.pkl` déjà créé : le nouveau modèle sera alors entraîné sur l'ancien jeu de documents **et** les nouveaux, ce qui affine les catégories au fil du temps sans perdre ce qui a déjà été appris. Les **renommages et suppressions faits dans "Transformer les données" sont conservés** : chaque document repasse d'abord dans l'ancien modèle pour connaître son ancienne catégorie (nouveau nom ou "autre" en cas de suppression), et cette catégorie est reprise pour toute nouvelle catégorie qui lui correspond majoritairement — seuls les sujets vraiment nouveaux reçoivent un nom fraîchement généré.
 5. **Choisir le nom du modèle** (juste un nom, pas un chemin — l'emplacement se déduit automatiquement, affiché en direct sous le champ) et cliquer sur **"Entraîner le modèle"**.
 
@@ -94,6 +100,7 @@ Chaque modèle nommé `<nom>` obtient son propre dossier, **toujours au même en
 storage/models/<nom>/
     <nom>.pkl              le modèle entraîné
     <nom>.json               les catégories et les fichiers qui y contribuent
+    <nom>_digest.json        résumé condensé du corpus (voir ci-dessous)
     dataset/                   une COPIE de chaque document utilisé, organisée par catégorie
       <catégorie>/               (jamais les documents d'origine, qui ne sont jamais déplacés)
     pkl_history/, json_history/, dataset_history/
@@ -101,6 +108,12 @@ storage/models/<nom>/
 ```
 
 Le dossier `dataset/` est **cumulatif** : chaque entraînement, amélioration depuis l'onglet Entraînement ou depuis la Classification y ajoute ses documents (ou les déplace si leur catégorie change), sans jamais perdre ce qui a été ajouté lors d'un cycle précédent. C'est ce dossier que consulte l'onglet Transformer les données, et le bouton **"Ouvrir le dossier du modèle"** l'ouvre directement dans l'explorateur de fichiers.
+
+### Résumé du corpus (`<nom>_digest.json`)
+
+À chaque entraînement ou amélioration, un résumé condensé de tous les documents utilisés est enregistré à côté du modèle — pas le texte intégral (qui peut être volumineux et redondant), mais pour chaque document : son nom, sa catégorie, un extrait lisible (~500 caractères, coupé proprement sur un mot) et ses mots-clés les plus représentatifs. En TF-IDF, ces mots-clés sont tirés directement des vecteurs déjà calculés pour le regroupement (aucun coût supplémentaire) ; en embeddings, d'une passe TF-IDF légère et indépendante dédiée à l'extraction de mots-clés.
+
+Ce fichier, nettement plus petit que le texte brut, est pensé pour servir de corpus à un futur modèle d'IA local avec un contexte réduit — par exemple pour proposer un nom de catégorie plus pertinent, ou résumer un fichier, sans avoir à ré-extraire ni relire l'intégralité des documents d'origine. Il contient aussi, si l'option est activée (voir Étape 1), la liste des paires de documents quasi identiques détectées (`"duplicates"`).
 
 ### Revenir en arrière (historique)
 
@@ -111,7 +124,7 @@ Avant chaque entraînement, amélioration ou renommage, l'état précédent du m
 Les noms détectés automatiquement (mots-clés TF-IDF, ex. `competences_vitae_techniques`) ne sont pas toujours parlants. Cet onglet se charge automatiquement avec le modèle qui vient d'être entraîné, et présente les catégories dans un tableau (à gauche) avec un panneau de détails (à droite) :
 
 1. **Choisir un modèle** si besoin (même sélecteur que dans les autres onglets — sinon le modèle tout juste entraîné est déjà chargé).
-2. Le tableau affiche pour chaque catégorie sa colonne **"Catégorie"** (le nom actuel, éventuellement renommé) et sa colonne **"Nom détecté par le modèle"** (le nom d'origine, basé sur les mots-clés TF-IDF, qui ne change jamais — même après un ou plusieurs renommages, ou un ré-entraînement qui a repris ce nom). Utile pour retrouver ce que le modèle a réellement identifié derrière un nom personnalisé.
+2. Le tableau affiche pour chaque catégorie sa colonne **"Catégorie"** (le nom actuel, éventuellement renommé) et sa colonne **"Nom détecté par le modèle"** (le ou les noms d'origine, basés sur les mots-clés TF-IDF ou KeyBERT, qui ne changent jamais — même après un ou plusieurs renommages, ou un ré-entraînement qui a repris ce nom). Utile pour retrouver ce que le modèle a réellement identifié derrière un nom personnalisé. **Chaque catégorie n'apparaît qu'une seule fois** dans le tableau, même si plusieurs regroupements internes du modèle partagent le même nom affiché (ex. après plusieurs améliorations successives) — leurs noms d'origine respectifs sont alors listés ensemble, séparés par « / ».
 3. **Cliquer sur une catégorie** dans le tableau pour voir, à droite, la **liste de ses fichiers** (depuis le dossier `dataset/` du modèle — voir "Où sont rangés les modèles" ci-dessus).
 4. **Renommer** : modifier le champ "Nouveau nom" puis cliquer sur "Renommer" — le modèle et son dossier `dataset/` sont mis à jour immédiatement (pas de bouton "Enregistrer" global à part).
 5. **"Ouvrir le dossier"** : ouvre le sous-dossier de cette catégorie dans l'explorateur de fichiers.
@@ -134,6 +147,12 @@ Si le modèle modifié est déjà chargé dans l'onglet Classification, il y est
 
 **Amélioration continue (optionnelle)** — la case **"Améliorer le modèle avec ces documents"** (décochée par défaut, réglable dans Paramètres) fait, après la validation, repasser le modèle chargé par un ré-entraînement. Seuls les documents **réellement corrigés à la main** (double-clic, avec une catégorie différente de la proposition initiale et différente de "a_verifier"/"illisible") y contribuent, comme référence certaine plutôt qu'une simple prédiction : classer un document que le modèle a déjà bien deviné, sans le corriger, ne change rien au modèle. Ce fonctionnement conserve toujours les catégories déjà renommées ou supprimées dans "Transformer les données", et met à jour à chaque fois le dossier `dataset/` du modèle : le lien entre le modèle, ses catégories et leurs fichiers reste donc toujours consultable dans "Transformer les données", même après une amélioration continue déclenchée depuis la Classification. Le modèle est mis à jour en tâche de fond ; une barre de progression s'affiche pendant l'opération.
 
+Une catégorie confirmée à la main reste **acquise pour ce document précis**, même si le regroupement automatique (non supervisé) ne la retrouve pas naturellement : elle apparaît dans "Transformer les données" (avec la mention "confirmée manuellement" si aucun cluster ne porte ce nom), et une classification ultérieure du même document — même dans un nouveau dossier d'export, tant que son contenu est identique — lui redonne systématiquement cette catégorie avec une confiance de 100 %, plutôt que de le laisser retomber sous un nom "naturel" différent au hasard du clustering.
+
+**Documents en double** — deux boutons complètent la liste :
+- **"Détecter les doublons"** : compare les documents actuellement chargés (mêmes vecteurs que la prédiction, aucun calcul supplémentaire) et affiche les paires quasi identiques trouvées (similarité ≥ 97 %).
+- **"Supprimer les doublons"** (activé après une détection ayant trouvé quelque chose) : déplace les exemplaires en trop vers un dossier **`_backup`** créé à côté du dossier d'origine de chaque fichier — jamais une suppression définitive — et les retire de la liste. Un exemplaire de chaque groupe de quasi-doublons est toujours conservé.
+
 ## Étape 4 — Automatisation (classification en continu, sans intervention)
 
 Fait la même chose que la Classification, mais **automatiquement et à intervalle régulier**, sans qu'on ait besoin de rouvrir l'outil à chaque fois.
@@ -152,7 +171,7 @@ Tous les réglages techniques de l'application sont pilotables depuis cet onglet
 
 | Groupe | Réglages |
 |---|---|
-| Regroupement automatique | nombre minimal/maximal de catégories à essayer, nombre de mots-clés utilisés pour nommer une catégorie, score de silhouette minimal et nombre minimal de documents par catégorie pour accepter un découpage |
+| Regroupement automatique | nombre minimal/maximal de catégories à essayer, nombre de mots-clés utilisés pour nommer une catégorie, score de silhouette minimal et nombre minimal de documents par catégorie pour accepter un découpage, nommage via KeyBERT activé par défaut, détection des doublons activée par défaut |
 | Vectorisation | taille du vocabulaire TF-IDF, taille des n-grammes, modèle d'embeddings par défaut |
 | Classification | seuil de confiance minimal, noms des catégories "incertain", "illisible" et "autre" (suppression), cases "Améliorer le modèle" et "Inclure les fichiers à vérifier/non catégorisé dans l'export" cochées par défaut ou non |
 | Dossiers de sortie | dossier racine des modèles (`storage/models/`), dossier de sortie par défaut (Classification) |
@@ -203,6 +222,23 @@ Un mode supplémentaire, réservé à la CLI, permet un entraînement **supervis
 ```bash
 python ml_pdf.py train --input ./mes_categories --model model.pkl
 ```
+
+## Compiler un exécutable autonome (sans Python installé sur le poste cible)
+
+`build.ps1` (Windows) et `build.sh` (Linux, y compris depuis WSL) compilent l'application en exécutable autonome avec [PyInstaller](https://pyinstaller.org/) — installez d'abord `pip install -r requirements-build.txt`.
+
+```bash
+powershell -File build.ps1        # Windows : dossier ClasseurDocuments/ dans build-windows/dist/
+./build.sh                        # Linux : dossier ClasseurDocuments/ dans build-linux/dist/
+```
+
+Ajoutez `--onefile` (`--Onefile` pour build.ps1) pour un seul exécutable au lieu d'un dossier — plus simple à distribuer, mais un peu plus lent à démarrer (extraction dans un dossier temporaire à chaque lancement).
+
+Par défaut (variante `lite`), le moteur embeddings (sentence-transformers + torch, ~1 Go) est exclu — c'est déjà le moteur TF-IDF qui est recommandé par défaut dans l'application (voir l'étape 1). Pour l'inclure : `-Variant full` / `--full`.
+
+**Compilation croisée impossible** : un exécutable Windows ne peut être produit que depuis Windows, un exécutable Linux que depuis Linux — chaque script doit tourner sur sa propre plateforme (ou dans WSL pour Linux depuis une machine Windows). Ne jamais lancer les deux scripts en même temps sur un dossier de sortie partagé.
+
+**Nuitka a été essayé puis abandonné** pour ce projet : PyMuPDF embarque un fichier C auto-généré de ~2,3 millions de lignes que MSVC ne peut pas compiler (erreur `C1002`, mémoire interne insuffisante), et MinGW64 casse sur un problème différent d'en-têtes Windows. PyInstaller copie les extensions déjà compilées au lieu de les recompiler depuis la source, évitant structurellement ce type de problème — l'exécutable produit est un peu plus gros et démarre un peu plus lentement, mais le build est nettement plus robuste avec cette pile de dépendances (numpy + scipy + scikit-learn + PyMuPDF).
 
 ## Formats de fichiers pris en charge
 

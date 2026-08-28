@@ -65,6 +65,21 @@ class AppConfig:
     # produisant une catégorie par document ou presque plutôt qu'une
     # catégorisation utilisable.
     cluster_min_cluster_size: int = 2
+    # Utilise KeyBERT (mots-clés choisis par similarité sémantique via un
+    # modèle d'embeddings, plutôt que par simple fréquence TF-IDF) pour
+    # nommer les catégories détectées — noms généralement plus naturels et
+    # lisibles. Réutilise all-MiniLM-L6-v2, déjà le modèle d'embeddings léger
+    # par défaut de l'application. Se replie automatiquement sur le nommage
+    # TF-IDF si le paquet optionnel `keybert` n'est pas installé.
+    cluster_use_keybert: bool = True
+    # Détecte, pendant l'entraînement, les paires de documents quasi
+    # identiques (similarité cosinus sur les vecteurs déjà calculés pour le
+    # regroupement — aucun calcul supplémentaire lourd). Désactivé
+    # automatiquement au-delà de `cluster_duplicate_max_docs` documents pour
+    # éviter un coût en O(n²) sur un très gros corpus.
+    cluster_detect_duplicates: bool = True
+    cluster_duplicate_threshold: float = 0.97
+    cluster_duplicate_max_docs: int = 4000
 
     # ── Vectorisation ──
     tfidf_max_features: int = 4000

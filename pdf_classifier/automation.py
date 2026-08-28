@@ -10,7 +10,13 @@ import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
-from .classify import classify_documents, load_model_for_prediction, uncertain_category, unreadable_category
+from .classify import (
+    classify_documents,
+    load_model_for_prediction,
+    model_extensions,
+    uncertain_category,
+    unreadable_category,
+)
 from .config import get_config
 from .extraction import extract_documents
 from .utils import dispatch_file, write_json_atomic
@@ -91,7 +97,9 @@ class AutomationJob:
             self._stop_event.wait(self.config.interval_seconds())
 
     def _run_once(self) -> None:
-        documents = extract_documents(self.config.watch_dir, recursive=self.config.recursive)
+        documents = extract_documents(
+            self.config.watch_dir, recursive=self.config.recursive, extensions=model_extensions(self.bundle)
+        )
         new_documents = [d for d in documents if d.path not in self._seen]
         self.last_run = datetime.now(timezone.utc).isoformat(timespec="seconds")
 

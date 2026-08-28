@@ -8,6 +8,7 @@ reste pleinement utilisable via les boutons "Ajouter des fichiers..." /
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import tkinter as tk
@@ -26,18 +27,26 @@ from .automation import AutomationConfig, AutomationManager
 from .classify import (
     known_categories,
     load_model_for_prediction,
+    model_extensions,
     predict_labels,
     uncertain_category,
     unreadable_category,
 )
 from .config import DEFAULT_CONFIG_PATH, AppConfig, get_config, reload_config, save_config
 from .discover import build_model as build_model_fn
+from .discover import delete_training_duplicates as delete_training_duplicates_fn
 from .discover import improve_model as improve_model_fn
 from .extraction import ExtractedDocument, extract_text, list_documents
 from .features import DEFAULT_EMBEDDING_MODEL, EMBEDDING_MODEL_CATALOG, ENGINE_EMBEDDINGS, ENGINE_TFIDF
 from .formats import SUPPORTED_EXTENSIONS, is_supported
 from .rename import delete_category, list_category_files, rename_categories, rename_files_with_prefix
-from .utils import dispatch_file, write_json_atomic
+from .utils import (
+    detect_duplicate_pairs,
+    dispatch_file,
+    duplicate_removal_candidates,
+    move_files_to_local_backup,
+    write_json_atomic,
+)
 
 FILETYPES_DOCS = [
     ("Documents pris en charge", " ".join(f"*{ext}" for ext in SUPPORTED_EXTENSIONS)),
@@ -91,6 +100,7 @@ class ClassifyTab(ttk.Frame):
         self.discovered_models: list[tuple[str, int]] = []
         self.selected_row: Row | None = None
         self.last_dispatch_dir: str | None = None
+        self._duplicate_pairs: list[dict] = []
 
         self._build_layout()
         self._refresh_model_picker()
@@ -133,6 +143,13 @@ class ClassifyTab(ttk.Frame):
         ttk.Button(buttons, text="Ajouter des fichiers...", command=self._add_files_dialog).pack(side="left")
         ttk.Button(buttons, text="Ajouter un dossier...", command=self._add_folder_dialog).pack(side="left", padx=6)
         ttk.Button(buttons, text="Vider la liste", command=self._clear_rows).pack(side="left")
+        ttk.Button(buttons, text="Détecter les doublons", command=self._detect_duplicates).pack(
+            side="left", padx=(18, 0)
+        )
+        self.delete_duplicates_button = ttk.Button(
+            buttons, text="Supprimer les doublons", command=self._delete_duplicates, state="disabled",
+        )
+        self.delete_duplicates_button.pack(side="left", padx=6)
 
         paned = ttk.PanedWindow(self, orient="horizontal")
         paned.pack(fill="both", expand=True, pady=10)
@@ -254,6 +271,14 @@ class ClassifyTab(ttk.Frame):
             self._load_model(model_path)
 
     # ── Ajout de fichiers ──
+    def _model_extensions(self) -> tuple[str, ...]:
+        """Types de fichiers du modèle chargé (voir `classify.model_extensions`) :
+        un modèle entraîné uniquement sur des `.pdf` ne doit faire remonter
+        que des `.pdf` quand on parcourt un dossier ou qu'on y glisse-dépose
+        des fichiers. Tous les formats pris en charge si aucun modèle n'est
+        encore chargé."""
+        return model_extensions(self.bundle) if self.bundle is not None else SUPPORTED_EXTENSIONS
+
     def _add_files_dialog(self) -> None:
         paths = filedialog.askopenfilenames(title="Choisir des documents", filetypes=FILETYPES_DOCS)
         self._add_paths(paths)
@@ -262,15 +287,16 @@ class ClassifyTab(ttk.Frame):
         directory = filedialog.askdirectory(title="Choisir un dossier de documents")
         if not directory:
             return
-        self._add_paths(list_documents(directory))
+        self._add_paths(list_documents(directory, extensions=self._model_extensions()))
 
     def _on_drop(self, event) -> None:
         paths = self.tk.splitlist(event.data)
+        extensions = self._model_extensions()
         documents = []
         for path in paths:
             if os.path.isdir(path):
-                documents.extend(list_documents(path, recursive=True))
-            elif is_supported(path):
+                documents.extend(list_documents(path, recursive=True, extensions=extensions))
+            elif is_supported(path) and os.path.splitext(path)[1].lower() in extensions:
                 documents.append(path)
         self._add_paths(documents)
 
@@ -329,7 +355,66 @@ class ClassifyTab(ttk.Frame):
         self.selected_row = None
         self._set_preview_text("")
         self.open_file_button.configure(state="disabled")
+        self._duplicate_pairs = []
+        self.delete_duplicates_button.configure(state="disabled")
         self.status.set("Liste vidée.")
+
+    # ── Doublons ──
+    def _detect_duplicates(self) -> None:
+        readable_rows = [r for r in self.rows.values() if r.text.strip()]
+        if len(readable_rows) < 2:
+            messagebox.showinfo(
+                "Détection des doublons", "Il faut au moins 2 fichiers lisibles dans la liste pour comparer."
+            )
+            return
+        if self.engine is None:
+            messagebox.showwarning("Aucun modèle", "Chargez un modèle avant de détecter les doublons.")
+            return
+
+        config = get_config()
+        vectors = self.engine.transform([r.text for r in readable_rows])
+        pairs = detect_duplicate_pairs(
+            [r.path for r in readable_rows], [r.filename for r in readable_rows], vectors,
+            threshold=config.cluster_duplicate_threshold, max_docs=config.cluster_duplicate_max_docs,
+        )
+        self._duplicate_pairs = pairs
+
+        if not pairs:
+            self.delete_duplicates_button.configure(state="disabled")
+            messagebox.showinfo(
+                "Détection des doublons", f"Aucun doublon détecté parmi {len(readable_rows)} fichier(s)."
+            )
+            return
+
+        self.delete_duplicates_button.configure(state="normal")
+        DuplicatesDialog(self, pairs, on_confirm=lambda: self._delete_duplicates(confirm=False))
+
+    def _delete_duplicates(self, confirm: bool = True) -> None:
+        if not self._duplicate_pairs:
+            return
+        to_remove = duplicate_removal_candidates(self._duplicate_pairs)
+        if not to_remove:
+            return
+        if confirm and not messagebox.askyesno(
+            "Confirmer",
+            f"Déplacer {len(to_remove)} document(s) en double vers un dossier « _backup » à côté de "
+            "leur dossier d'origine ? Ce n'est jamais une suppression définitive.",
+        ):
+            return
+
+        moved = move_files_to_local_backup(to_remove)
+        for path in to_remove:
+            row = self.rows.pop(path, None)
+            if row and row.item_id:
+                self.tree.delete(row.item_id)
+
+        self._duplicate_pairs = []
+        self.delete_duplicates_button.configure(state="disabled")
+        self.status.set(f"{len(moved)} document(s) en double déplacé(s) vers un dossier « _backup ».")
+        messagebox.showinfo(
+            "Doublons déplacés",
+            f"{len(moved)} document(s) déplacé(s) vers un dossier « _backup » à côté de leur dossier d'origine.",
+        )
 
     # ── Aperçu du fichier sélectionné ──
     def _on_select_row(self, _event=None) -> None:
@@ -426,6 +511,14 @@ class ClassifyTab(ttk.Frame):
         confirmed_labels: dict[str, str] = {}
         placeholder_categories = {uncertain_category(), unreadable_category()}
         model_path_snapshot = self.model_path.get()
+        # Corrections manuelles qui NE PEUVENT PAS contribuer à l'amélioration
+        # du modèle faute de texte exploitable (PDF scanné sans OCR, fichier
+        # corrompu...) : l'export les classe correctement quand même (il ne
+        # dépend que de la catégorie choisie, pas du texte), mais sans texte
+        # il n'y a rien à vectoriser pour le ré-entraînement. Sans ce
+        # compteur, "Améliorer le modèle" coché échouait silencieusement pour
+        # ces fichiers-là, sans aucune indication à l'utilisateur.
+        unreadable_corrections = 0
 
         for row in self.rows.values():
             category = row.corrected_category or uncertain_category()
@@ -443,9 +536,14 @@ class ClassifyTab(ttk.Frame):
                     "confidence": row.confidence,
                     "destination": dest,
                 }
-                if row.manually_corrected and category not in placeholder_categories and row.text.strip():
-                    improve_batch.append(ExtractedDocument(path=dest, filename=os.path.basename(dest), text=row.text))
-                    confirmed_labels[dest] = category
+                if row.manually_corrected and category not in placeholder_categories:
+                    if row.text.strip():
+                        improve_batch.append(
+                            ExtractedDocument(path=dest, filename=os.path.basename(dest), text=row.text)
+                        )
+                        confirmed_labels[dest] = category
+                    else:
+                        unreadable_corrections += 1
             except Exception as exc:
                 errors.append(f"{row.filename} : {exc}")
 
@@ -462,6 +560,17 @@ class ClassifyTab(ttk.Frame):
             message += f"\n{skipped_uncertain} fichier(s) \"à vérifier\" exclu(s) de l'export."
         if skipped_unreadable:
             message += f"\n{skipped_unreadable} fichier(s) \"non catégorisé\" exclu(s) de l'export."
+        if self.improve_model_var.get() and self.bundle is not None:
+            if should_improve:
+                message += f"\n\nAmélioration du modèle en cours avec {len(improve_batch)} document(s) corrigé(s)..."
+            elif unreadable_corrections:
+                message += (
+                    f"\n\n⚠ {unreadable_corrections} correction(s) manuelle(s) n'ont pas pu améliorer le modèle : "
+                    "aucun texte n'a pu être extrait de ces fichiers (PDF scanné sans OCR, fichier corrompu...). "
+                    "Ils ont bien été classés dans l'export, mais le modèle n'apprend rien d'un fichier sans texte."
+                )
+            else:
+                message += "\n\nAucune correction manuelle exploitable : le modèle n'a pas été modifié."
         if errors:
             message += "\n\nErreurs :\n" + "\n".join(errors)
             messagebox.showwarning("Terminé avec erreurs", message)
@@ -543,7 +652,7 @@ ENGINE_EXPLANATION = (
 TRAINING_PRESETS: list[tuple[str, str, dict]] = [
     (
         "Par défaut (valeurs de Paramètres)",
-        "Aucun réglage particulier : reprend les valeurs actuelles de l'onglet Paramètres.",
+        "Aucun réglage particulier : reprend les valeurs actuelles de l'onglet Paramètres (TF-IDF).",
         {},
     ),
     (
@@ -556,15 +665,6 @@ TRAINING_PRESETS: list[tuple[str, str, dict]] = [
         },
     ),
     (
-        "Documents hétérogènes en texte libre (contrats variés, courriers, rapports)",
-        "Embeddings multilingues : plus adaptés à des documents qui parlent de la même chose "
-        "sans partager le même vocabulaire exact.",
-        {
-            "engine": ENGINE_EMBEDDINGS, "embedding_model": "paraphrase-multilingual-MiniLM-L12-v2",
-            "k_max": 15, "cluster_min_silhouette": 0.12, "cluster_min_cluster_size": 2,
-        },
-    ),
-    (
         "Mélange de plusieurs types de documents (factures + contrats + fiches de paie...)",
         "TF-IDF avec un vocabulaire plus large : des types de documents différents partagent en "
         "général peu de vocabulaire exact, TF-IDF les sépare bien sans rien télécharger.",
@@ -574,13 +674,278 @@ TRAINING_PRESETS: list[tuple[str, str, dict]] = [
         },
     ),
     (
+        "Gros volume de documents, priorité à la vitesse",
+        "TF-IDF avec un vocabulaire réduit et des mots seuls (pas de groupes de mots) : rapide "
+        "sur un très grand nombre de documents, au prix d'un peu de finesse.",
+        {
+            "engine": ENGINE_TFIDF, "tfidf_max_features": 2000, "tfidf_ngram_max": 1,
+            "k_max": 20, "cluster_min_silhouette": 0.12, "cluster_min_cluster_size": 2,
+        },
+    ),
+    (
         "Exploration permissive (tout faire ressortir, à trier ensuite)",
-        "Seuils très bas : fait ressortir un maximum de sous-groupes, y compris incertains, à "
-        "corriger ensuite dans l'onglet Transformer les données.",
-        {"k_max": 20, "cluster_min_silhouette": 0.02, "cluster_min_cluster_size": 1},
+        "TF-IDF, seuils très bas : fait ressortir un maximum de sous-groupes, y compris "
+        "incertains, à corriger ensuite dans l'onglet Transformer les données.",
+        {
+            "engine": ENGINE_TFIDF, "k_max": 20,
+            "cluster_min_silhouette": 0.02, "cluster_min_cluster_size": 1,
+        },
+    ),
+    (
+        "Texte libre, léger et rapide (anglais)",
+        "Embeddings all-MiniLM-L6-v2 (~90 Mo, le plus rapide) : un premier essai en embeddings "
+        "sur un corpus hétérogène en anglais, sans attendre un téléchargement ou un calcul long.",
+        {
+            "engine": ENGINE_EMBEDDINGS, "embedding_model": "all-MiniLM-L6-v2",
+            "k_max": 15, "cluster_min_silhouette": 0.12, "cluster_min_cluster_size": 2,
+        },
+    ),
+    (
+        "Texte libre, un peu plus précis (anglais)",
+        "Embeddings all-MiniLM-L12-v2 (~120 Mo) : légèrement plus précis que L6, reste rapide, "
+        "pour du texte libre en anglais.",
+        {
+            "engine": ENGINE_EMBEDDINGS, "embedding_model": "all-MiniLM-L12-v2",
+            "k_max": 15, "cluster_min_silhouette": 0.12, "cluster_min_cluster_size": 2,
+        },
+    ),
+    (
+        "Texte libre en français, formulations variées (contrats, courriers, rapports)",
+        "Embeddings paraphrase-multilingual-MiniLM-L12-v2 (~470 Mo) : bon compromis "
+        "vitesse/précision pour du texte libre réellement rédigé en français.",
+        {
+            "engine": ENGINE_EMBEDDINGS, "embedding_model": "paraphrase-multilingual-MiniLM-L12-v2",
+            "k_max": 15, "cluster_min_silhouette": 0.12, "cluster_min_cluster_size": 2,
+        },
+    ),
+    (
+        "Texte libre, meilleure qualité (anglais)",
+        "Embeddings all-mpnet-base-v2 (~420 Mo) : la meilleure qualité en anglais parmi les "
+        "modèles proposés, plus lent.",
+        {
+            "engine": ENGINE_EMBEDDINGS, "embedding_model": "all-mpnet-base-v2",
+            "k_max": 15, "cluster_min_silhouette": 0.15, "cluster_min_cluster_size": 2,
+        },
+    ),
+    (
+        "Texte libre multilingue, meilleure qualité (lourd)",
+        "Embeddings paraphrase-multilingual-mpnet-base-v2 (~970 Mo) : la meilleure qualité "
+        "multilingue disponible (français inclus), le plus lent — pour un corpus réellement "
+        "hétérogène où la précision prime sur la vitesse.",
+        {
+            "engine": ENGINE_EMBEDDINGS, "embedding_model": "paraphrase-multilingual-mpnet-base-v2",
+            "k_max": 15, "cluster_min_silhouette": 0.15, "cluster_min_cluster_size": 2,
+        },
     ),
 ]
-_EMBEDDING_DESCRIPTIONS = dict(EMBEDDING_MODEL_CATALOG)
+
+# Regroupement des extensions prises en charge (voir formats.py) pour la
+# sélection des types de fichiers à inclure dans un entraînement — un seul
+# type, plusieurs, ou tous (cases cochées par défaut).
+EXTENSION_GROUPS: list[tuple[str, list[str]]] = [
+    ("Documents", [".pdf", ".docx", ".rtf"]),
+    ("Texte et données", [".txt", ".md", ".csv", ".tsv", ".log", ".json", ".yaml", ".yml", ".ini", ".cfg", ".toml"]),
+    ("Balisage", [".html", ".htm", ".xml"]),
+    ("Email", [".eml", ".msg"]),
+    ("Bureautique", [".xlsx", ".xlsm", ".pptx"]),
+]
+
+# Cas d'usage proposés dans l'onglet Entraînement : chacun pré-remplit les
+# types de fichiers et le préréglage moteur adaptés. Seuls "available: True"
+# s'appuient sur ce que l'outil sait déjà faire (catégorisation par
+# similarité) ; les autres nécessiteraient une capacité différente (extraction
+# de champs, détection de clauses...) pas encore implémentée — sélectionner
+# l'un d'eux affiche simplement une explication, sans rien changer au formulaire.
+USE_CASES: list[dict] = [
+    {
+        "name": "Classeur de documents (par défaut)",
+        "description": (
+            "Trie automatiquement des documents en vrac (factures, contrats, courriers...) "
+            "dans des catégories détectées automatiquement. Mode par défaut de cet onglet : "
+            "tous les types de fichiers, aucun réglage supplémentaire."
+        ),
+        "available": True,
+        "extensions": None,
+        "preset": TRAINING_PRESETS[0][0],
+    },
+    {
+        "name": "Trieur d'emails",
+        "description": (
+            "Classe des emails exportés (.eml, .msg) en catégories détectées automatiquement "
+            "(clients, admin, urgent...), avec le même moteur de catégorisation que le mode "
+            "par défaut, limité aux formats email. Pour imposer des catégories fixes (ex. "
+            "spam / non-spam), renommez les catégories détectées dans l'onglet Transformer les "
+            "données après l'entraînement — ce mode ne fournit pas de classifieur spam pré-entraîné."
+        ),
+        "available": True,
+        "extensions": [".eml", ".msg"],
+        "preset": "Texte libre en français, formulations variées (contrats, courriers, rapports)",
+    },
+    {
+        "name": "Extracteur de factures (à venir)",
+        "description": (
+            "Extraire automatiquement les champs clés d'une facture (date, montants HT/TTC, "
+            "TVA, IBAN, fournisseur) et les exporter en CSV/Excel. Nécessiterait un modèle "
+            "d'extraction de champs (NER) entraîné sur des factures annotées (ex. jeux de "
+            "données SROIE, CORD) — une capacité différente de la catégorisation par similarité "
+            "qu'offre l'outil aujourd'hui, pas encore implémentée."
+        ),
+        "available": False,
+    },
+    {
+        "name": "Analyseur de contrats (à venir)",
+        "description": (
+            "Détecter automatiquement les clauses clés d'un contrat (durée, résiliation, "
+            "pénalités, juridiction) et alerter sur les clauses à risque. Nécessiterait un "
+            "modèle de détection de clauses (type BERT finement ajusté, ex. sur le jeu de "
+            "données CUAD) — pas encore implémenté."
+        ),
+        "available": False,
+    },
+    {
+        "name": "Détecteur de doublons / plagiat (à venir)",
+        "description": (
+            "Détecter des documents quasi identiques dans une base, ou vérifier si un contenu "
+            "a déjà été publié ailleurs. Nécessiterait une recherche de similarité par "
+            "embeddings sur l'ensemble d'une base documentaire (au-delà du regroupement par lot "
+            "que fait l'entraînement actuel) — pas encore implémenté."
+        ),
+        "available": False,
+    },
+]
+
+
+class ScrollableFrame(ttk.Frame):
+    """Conteneur défilable verticalement (molette ou barre de défilement) :
+    le contenu réel se construit sur `self.body` plutôt que directement sur
+    l'instance — nécessaire dès qu'un onglet a plus de sections que n'en
+    tient la hauteur de la fenêtre (ex. l'onglet Entraînement, avec son
+    sélecteur de cas d'usage, son filtre de types de fichiers et ses
+    paramètres avancés en plus du formulaire de base)."""
+
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, **kwargs)
+        canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self.body = ttk.Frame(canvas, padding=10)
+        window = canvas.create_window((0, 0), window=self.body, anchor="nw")
+
+        self.body.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
+
+        def on_mousewheel(event: tk.Event) -> None:
+            if event.num == 4:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                canvas.yview_scroll(1, "units")
+            else:
+                canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        # La molette n'est branchée que pendant que le curseur survole cet
+        # onglet, pour ne pas capter le défilement d'un autre onglet actif.
+        canvas.bind("<Enter>", lambda _e: (
+            canvas.bind_all("<MouseWheel>", on_mousewheel),
+            canvas.bind_all("<Button-4>", on_mousewheel),
+            canvas.bind_all("<Button-5>", on_mousewheel),
+        ))
+        canvas.bind("<Leave>", lambda _e: (
+            canvas.unbind_all("<MouseWheel>"),
+            canvas.unbind_all("<Button-4>"),
+            canvas.unbind_all("<Button-5>"),
+        ))
+
+
+class DuplicatesDialog(tk.Toplevel):
+    """Affiche les paires de documents quasi identiques détectées, avec un
+    bouton pour déplacer les exemplaires en trop vers un dossier `_backup` —
+    jamais une suppression définitive. Réutilisé par l'onglet Entraînement
+    (après un entraînement où des doublons ont été trouvés) et l'onglet
+    Classification (bouton "Détecter les doublons")."""
+
+    def __init__(self, parent: tk.Widget, pairs: list[dict], on_confirm, note: str | None = None):
+        super().__init__(parent)
+        self.title("Documents en double détectés")
+        self.geometry("580x420")
+        self.transient(parent.winfo_toplevel())
+        self.on_confirm = on_confirm
+
+        ttk.Label(
+            self, text=f"{len(pairs)} paire(s) de documents quasi identiques détectée(s) :", padding=(10, 10, 10, 4),
+        ).pack(anchor="w")
+
+        list_frame = ttk.Frame(self, padding=(10, 0))
+        list_frame.pack(fill="both", expand=True)
+        listbox = tk.Listbox(list_frame)
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=listbox.yview)
+        listbox.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="left", fill="y")
+        for pair in pairs:
+            listbox.insert("end", f"{pair['filename_a']}  ≈  {pair['filename_b']}   ({pair['similarity']:.0%})")
+
+        if note is None:
+            note = (
+                "Un exemplaire de chaque groupe de doublons est gardé ; les autres seront déplacés "
+                "vers un dossier « _backup » à côté de leur dossier d'origine — jamais supprimés "
+                "définitivement, toujours récupérables au besoin."
+            )
+        ttk.Label(
+            self, text=note, foreground="#555", wraplength=540, justify="left", padding=10,
+        ).pack(anchor="w")
+
+        actions = ttk.Frame(self, padding=10)
+        actions.pack(fill="x")
+        ttk.Button(actions, text="Fermer", command=self.destroy).pack(side="right")
+        ttk.Button(
+            actions, text="Déplacer les doublons vers _backup", command=self._confirm,
+        ).pack(side="right", padx=6)
+
+        self.grab_set()
+
+    def _confirm(self) -> None:
+        self.destroy()
+        self.on_confirm()
+
+
+class EngineHelpDialog(tk.Toplevel):
+    """Fenêtre d'aide structurée pour l'onglet Entraînement : pourquoi
+    choisir TF-IDF ou embeddings, quel modèle d'embeddings choisir, et ce
+    que fait chaque préréglage — regroupé ici plutôt qu'affiché en
+    permanence dans le formulaire principal (bouton "? Explications")."""
+
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("Moteur d'analyse — explications")
+        self.geometry("720x600")
+        self.transient(parent.winfo_toplevel())
+
+        text = scrolledtext.ScrolledText(self, wrap="word", padx=12, pady=10)
+        text.pack(fill="both", expand=True)
+        text.tag_configure("h1", font=("TkDefaultFont", 12, "bold"), spacing1=4, spacing3=6)
+        text.tag_configure("h2", font=("TkDefaultFont", 10, "bold"), spacing1=10, spacing3=2)
+        text.tag_configure("body", font=("TkDefaultFont", 9), spacing3=4)
+
+        text.insert("end", "TF-IDF ou embeddings : lequel choisir ?\n", "h1")
+        text.insert("end", ENGINE_EXPLANATION + "\n\n", "body")
+
+        text.insert("end", "Modèles d'embeddings disponibles (léger → lourd)\n", "h1")
+        for name, description in EMBEDDING_MODEL_CATALOG:
+            text.insert("end", f"{name}\n", "h2")
+            text.insert("end", description + "\n", "body")
+
+        text.insert("end", "\nPréréglages disponibles\n", "h1")
+        for name, description, _values in TRAINING_PRESETS:
+            text.insert("end", f"{name}\n", "h2")
+            text.insert("end", description + "\n", "body")
+
+        text.configure(state="disabled")
+
+        ttk.Button(self, text="Fermer", command=self.destroy).pack(pady=(0, 10))
+        self.grab_set()
 
 
 class TrainTab(ttk.Frame):
@@ -589,9 +954,13 @@ class TrainTab(ttk.Frame):
     similarité), comme le mode 'discover' de la CLI."""
 
     def __init__(self, parent, on_model_created=None):
-        super().__init__(parent, padding=10)
+        super().__init__(parent)
+        scrollable = ScrollableFrame(self)
+        scrollable.pack(fill="both", expand=True)
+        self.body = scrollable.body
         self.on_model_created = on_model_created
         self.input_dir = tk.StringVar()
+        self.recursive_var = tk.BooleanVar(value=True)
         self.model_name_var = tk.StringVar()
         self.base_model_path = tk.StringVar()
         self.engine = tk.StringVar(value=ENGINE_TFIDF)
@@ -604,86 +973,150 @@ class TrainTab(ttk.Frame):
         self.min_cluster_size_var = tk.IntVar(value=config.cluster_min_cluster_size)
         self.tfidf_max_features_var = tk.IntVar(value=config.tfidf_max_features)
         self.tfidf_ngram_max_var = tk.IntVar(value=config.tfidf_ngram_max)
+        self.use_keybert_var = tk.BooleanVar(value=config.cluster_use_keybert)
+        self.detect_duplicates_var = tk.BooleanVar(value=config.cluster_detect_duplicates)
+        self.use_case_var = tk.StringVar(value=USE_CASES[0]["name"])
+        self._last_use_case = USE_CASES[0]["name"]
+        self.extension_vars: dict[str, tk.BooleanVar] = {
+            ext: tk.BooleanVar(value=True) for _group, exts in EXTENSION_GROUPS for ext in exts
+        }
         self.last_model_path: str | None = None
+        self._log_row: int = 0
         self._build()
         self.model_name_var.trace_add("write", self._update_resolved_path)
 
     def _build(self) -> None:
-        ttk.Label(self, text="1. Dossier de documents à analyser (en vrac, aucun tri préalable requis) :").grid(
-            row=0, column=0, columnspan=3, sticky="w"
+        row = 0
+        self._build_use_case_selector(row)
+        row += 1
+
+        ttk.Label(self.body, text="1. Dossier de documents à analyser (en vrac, aucun tri préalable requis) :").grid(
+            row=row, column=0, columnspan=3, sticky="w"
         )
-        ttk.Entry(self, textvariable=self.input_dir, width=70).grid(row=1, column=0, columnspan=2, sticky="we")
-        ttk.Button(self, text="Parcourir...", command=self._choose_input_dir).grid(row=1, column=2, padx=4)
+        row += 1
+        ttk.Entry(self.body, textvariable=self.input_dir, width=70).grid(row=row, column=0, columnspan=2, sticky="we")
+        ttk.Button(self.body, text="Parcourir...", command=self._choose_input_dir).grid(row=row, column=2, padx=4)
+        row += 1
+        ttk.Checkbutton(
+            self.body, text="Inclure les sous-dossiers", variable=self.recursive_var,
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        row += 1
 
-        ttk.Label(self, text="2. Moteur d'analyse :").grid(row=2, column=0, sticky="w", pady=(14, 0))
-        engine_combo = ttk.Combobox(
-            self, textvariable=self.engine, values=[ENGINE_TFIDF, ENGINE_EMBEDDINGS], state="readonly", width=15
-        )
-        engine_combo.grid(row=3, column=0, sticky="w")
-        engine_combo.bind("<<ComboboxSelected>>", self._on_engine_change)
+        self._build_extension_filter(row)
+        row += 1
 
-        embedding_frame = ttk.Frame(self)
-        embedding_frame.grid(row=3, column=1, columnspan=2, sticky="w", padx=(20, 0))
-        self.embedding_label = ttk.Label(embedding_frame, text="Modèle d'embeddings (léger → lourd) :")
-        self.embedding_label.pack(anchor="w")
-        self.embedding_combo = ttk.Combobox(
-            embedding_frame, textvariable=self.embedding_model,
-            values=[name for name, _description in EMBEDDING_MODEL_CATALOG],
-            state="readonly", width=45,
-        )
-        self.embedding_combo.pack(anchor="w")
-        self.embedding_combo.bind("<<ComboboxSelected>>", self._update_embedding_description)
-
-        self.embedding_description_var = tk.StringVar()
-        ttk.Label(
-            embedding_frame, textvariable=self.embedding_description_var,
-            foreground="#555", wraplength=420, justify="left",
-        ).pack(anchor="w", pady=(2, 0))
-
-        self._update_embedding_description()
-
-        explanation = tk.Label(
-            self, text=ENGINE_EXPLANATION, justify="left", wraplength=760, anchor="w",
-            bg="#eef2f7", fg="#33475b", padx=8, pady=6,
-        )
-        explanation.grid(row=4, column=0, columnspan=3, sticky="we", pady=(6, 0))
-
-        self._build_advanced_params()
+        row = self._build_engine_section(row)
         self._on_engine_change()
 
         ttk.Label(
-            self, text="3. Modèle existant à améliorer avec ces nouvelles données (optionnel) :"
-        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(14, 0))
-        ttk.Entry(self, textvariable=self.base_model_path, width=70).grid(row=7, column=0, columnspan=2, sticky="we")
-        ttk.Button(self, text="Parcourir...", command=self._choose_base_model).grid(row=7, column=2, padx=4)
-        ttk.Button(self, text="Aucun (nouveau modèle)", command=lambda: self.base_model_path.set("")).grid(
-            row=8, column=0, sticky="w", pady=(2, 0)
+            self.body, text="3. Modèle existant à améliorer avec ces nouvelles données (optionnel) :"
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(14, 0))
+        row += 1
+        ttk.Entry(self.body, textvariable=self.base_model_path, width=70).grid(row=row, column=0, columnspan=2, sticky="we")
+        ttk.Button(self.body, text="Parcourir...", command=self._choose_base_model).grid(row=row, column=2, padx=4)
+        row += 1
+        ttk.Button(self.body, text="Aucun (nouveau modèle)", command=lambda: self.base_model_path.set("")).grid(
+            row=row, column=0, sticky="w", pady=(2, 0)
         )
+        row += 1
 
-        ttk.Label(self, text="4. Nom du modèle :").grid(row=9, column=0, columnspan=3, sticky="w", pady=(14, 0))
-        ttk.Entry(self, textvariable=self.model_name_var, width=40).grid(row=10, column=0, sticky="w")
+        ttk.Label(self.body, text="4. Nom du modèle :").grid(row=row, column=0, columnspan=3, sticky="w", pady=(14, 0))
+        row += 1
+        ttk.Entry(self.body, textvariable=self.model_name_var, width=40).grid(row=row, column=0, sticky="w")
         self.resolved_path_var = tk.StringVar()
-        ttk.Label(self, textvariable=self.resolved_path_var, foreground="#555").grid(
-            row=10, column=1, columnspan=2, sticky="w", padx=(8, 0)
+        ttk.Label(self.body, textvariable=self.resolved_path_var, foreground="#555").grid(
+            row=row, column=1, columnspan=2, sticky="w", padx=(8, 0)
         )
+        row += 1
 
-        action_row = ttk.Frame(self)
-        action_row.grid(row=11, column=0, columnspan=3, sticky="w", pady=(12, 4))
+        action_row = ttk.Frame(self.body)
+        action_row.grid(row=row, column=0, columnspan=3, sticky="w", pady=(12, 4))
         self.train_button = ttk.Button(action_row, text="Entraîner le modèle", command=self._start_training)
         self.train_button.pack(side="left")
         self.open_folder_button = ttk.Button(
             action_row, text="Ouvrir le dossier du modèle", command=self._open_preview_dir, state="disabled"
         )
         self.open_folder_button.pack(side="left", padx=6)
+        row += 1
 
-        self.progress_bar = ttk.Progressbar(self, mode="indeterminate")
-        self.progress_bar.grid(row=12, column=0, columnspan=3, sticky="we", pady=(0, 8))
+        self.progress_bar = ttk.Progressbar(self.body, mode="indeterminate")
+        self.progress_bar.grid(row=row, column=0, columnspan=3, sticky="we", pady=(0, 8))
+        row += 1
 
-        self.log = scrolledtext.ScrolledText(self, height=14, state="disabled")
-        self.log.grid(row=13, column=0, columnspan=3, sticky="nsew")
+        self.log = scrolledtext.ScrolledText(self.body, height=14, state="disabled")
+        self.log.grid(row=row, column=0, columnspan=3, sticky="nsew")
+        self._log_row = row
 
-        self.grid_rowconfigure(13, weight=1)
-        self.grid_columnconfigure(0, weight=1)
+        self.body.grid_rowconfigure(row, weight=1)
+        self.body.grid_columnconfigure(0, weight=1)
+
+    def _build_use_case_selector(self, row: int) -> None:
+        frame = ttk.LabelFrame(self.body, text="Cas d'usage (facultatif)", padding=10)
+        frame.grid(row=row, column=0, columnspan=3, sticky="we", pady=(0, 10))
+
+        ttk.Label(frame, text="Pré-remplir le formulaire pour :").grid(row=0, column=0, sticky="w")
+        use_case_combo = ttk.Combobox(
+            frame, textvariable=self.use_case_var,
+            values=[uc["name"] for uc in USE_CASES],
+            state="readonly", width=55,
+        )
+        use_case_combo.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        use_case_combo.bind("<<ComboboxSelected>>", self._apply_use_case)
+
+        self.use_case_description_var = tk.StringVar(value=USE_CASES[0]["description"])
+        ttk.Label(
+            frame, textvariable=self.use_case_description_var, foreground="#555",
+            wraplength=720, justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+    def _apply_use_case(self, _event=None) -> None:
+        name = self.use_case_var.get()
+        use_case = next((uc for uc in USE_CASES if uc["name"] == name), None)
+        if use_case is None:
+            return
+        self.use_case_description_var.set(use_case["description"])
+
+        if not use_case["available"]:
+            messagebox.showinfo(name, use_case["description"])
+            self.use_case_var.set(self._last_use_case)
+            previous = next(uc for uc in USE_CASES if uc["name"] == self._last_use_case)
+            self.use_case_description_var.set(previous["description"])
+            return
+
+        self._last_use_case = name
+        extensions = use_case["extensions"]
+        for ext, var in self.extension_vars.items():
+            var.set(extensions is None or ext in extensions)
+
+        self.preset_var.set(use_case["preset"])
+        self._apply_preset()
+
+    def _build_extension_filter(self, row: int) -> None:
+        frame = ttk.LabelFrame(self.body, text="Types de fichiers à inclure", padding=10)
+        frame.grid(row=row, column=0, columnspan=3, sticky="we", pady=(8, 0))
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Button(buttons, text="Tout sélectionner", command=lambda: self._set_all_extensions(True)).pack(
+            side="left"
+        )
+        ttk.Button(buttons, text="Aucun", command=lambda: self._set_all_extensions(False)).pack(
+            side="left", padx=(6, 0)
+        )
+
+        for group_row, (group_name, extensions) in enumerate(EXTENSION_GROUPS, start=1):
+            ttk.Label(frame, text=f"{group_name} :").grid(row=group_row, column=0, sticky="nw", pady=2)
+            checks = ttk.Frame(frame)
+            checks.grid(row=group_row, column=1, sticky="w", pady=2)
+            for ext in extensions:
+                ttk.Checkbutton(checks, text=ext, variable=self.extension_vars[ext]).pack(side="left", padx=(0, 8))
+
+    def _set_all_extensions(self, value: bool) -> None:
+        for var in self.extension_vars.values():
+            var.set(value)
+
+    def _selected_extensions(self) -> tuple[str, ...]:
+        return tuple(ext for ext, var in self.extension_vars.items() if var.get())
 
     def _on_engine_change(self, _event=None) -> None:
         is_embeddings = self.engine.get() == ENGINE_EMBEDDINGS
@@ -692,12 +1125,23 @@ class TrainTab(ttk.Frame):
         self.tfidf_max_features_spin.configure(state=tfidf_state)
         self.tfidf_ngram_max_spin.configure(state=tfidf_state)
 
-    def _update_embedding_description(self, _event=None) -> None:
-        self.embedding_description_var.set(_EMBEDDING_DESCRIPTIONS.get(self.embedding_model.get(), ""))
+    def _build_engine_section(self, row: int) -> int:
+        """"2. Moteur d'analyse" : le préréglage choisi juste en dessous du
+        titre détermine le moteur ET tous ses paramètres, montrés ensuite —
+        un préréglage peut toujours être affiné en modifiant un champ
+        individuellement après coup. Les explications complètes (pourquoi
+        TF-IDF vs embeddings, ce que fait chaque préréglage...) sont dans une
+        fenêtre dédiée plutôt qu'affichées en permanence ici (bouton
+        "Explications")."""
+        header = ttk.Frame(self.body)
+        header.grid(row=row, column=0, columnspan=3, sticky="we", pady=(14, 0))
+        ttk.Label(header, text="2. Moteur d'analyse :").pack(side="left")
+        ttk.Button(header, text="? Explications", command=self._show_engine_help).pack(side="right")
+        row += 1
 
-    def _build_advanced_params(self) -> None:
-        frame = ttk.LabelFrame(self, text="Paramètres avancés du moteur (facultatif)", padding=10)
-        frame.grid(row=5, column=0, columnspan=3, sticky="we", pady=(10, 0))
+        frame = ttk.Frame(self.body)
+        frame.grid(row=row, column=0, columnspan=3, sticky="we", pady=(6, 0))
+        row += 1
 
         ttk.Label(frame, text="Préréglage :").grid(row=0, column=0, sticky="w")
         preset_combo = ttk.Combobox(
@@ -708,39 +1152,54 @@ class TrainTab(ttk.Frame):
         preset_combo.grid(row=0, column=1, columnspan=3, sticky="w", padx=(6, 0))
         preset_combo.bind("<<ComboboxSelected>>", self._apply_preset)
 
-        self.preset_description_var = tk.StringVar(value=TRAINING_PRESETS[0][1])
-        ttk.Label(
-            frame, textvariable=self.preset_description_var, foreground="#555",
-            wraplength=720, justify="left",
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 8))
+        ttk.Label(frame, text="Moteur :").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        engine_combo = ttk.Combobox(
+            frame, textvariable=self.engine, values=[ENGINE_TFIDF, ENGINE_EMBEDDINGS], state="readonly", width=15
+        )
+        engine_combo.grid(row=1, column=1, sticky="w", padx=(6, 0), pady=(10, 0))
+        engine_combo.bind("<<ComboboxSelected>>", self._on_engine_change)
 
-        def spin(row, col, label, var, from_, to, increment=1):
-            ttk.Label(frame, text=label).grid(row=row, column=col * 2, sticky="w", padx=(0 if col == 0 else 16, 0))
+        ttk.Label(frame, text="Modèle d'embeddings :").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        self.embedding_combo = ttk.Combobox(
+            frame, textvariable=self.embedding_model,
+            values=[name for name, _description in EMBEDDING_MODEL_CATALOG],
+            state="readonly", width=45,
+        )
+        self.embedding_combo.grid(row=2, column=1, columnspan=3, sticky="w", padx=(6, 0), pady=(4, 0))
+
+        def spin(spin_row, col, label, var, from_, to, increment=1):
+            ttk.Label(frame, text=label).grid(
+                row=spin_row, column=col * 2, sticky="w", padx=(0 if col == 0 else 16, 0), pady=(10, 0)
+            )
             box = ttk.Spinbox(frame, from_=from_, to=to, increment=increment, textvariable=var, width=8)
-            box.grid(row=row, column=col * 2 + 1, sticky="w", padx=(4, 0))
+            box.grid(row=spin_row, column=col * 2 + 1, sticky="w", padx=(4, 0), pady=(10, 0))
             return box
 
-        spin(2, 0, "Nb minimal de catégories :", self.k_min_var, 1, 100)
-        spin(2, 1, "Nb maximal de catégories :", self.k_max_var, 1, 200)
-        spin(3, 0, "Score de silhouette minimal :", self.min_silhouette_var, 0.0, 1.0, 0.01)
-        spin(3, 1, "Documents minimum par catégorie :", self.min_cluster_size_var, 1, 50)
-        self.tfidf_max_features_spin = spin(4, 0, "Vocabulaire TF-IDF maximal :", self.tfidf_max_features_var, 100, 50000, 100)
-        self.tfidf_ngram_max_spin = spin(4, 1, "Taille max des n-grammes :", self.tfidf_ngram_max_var, 1, 4)
+        spin(3, 0, "Nb minimal de catégories :", self.k_min_var, 1, 100)
+        spin(3, 1, "Nb maximal de catégories :", self.k_max_var, 1, 200)
+        spin(4, 0, "Score de silhouette minimal :", self.min_silhouette_var, 0.0, 1.0, 0.01)
+        spin(4, 1, "Documents minimum par catégorie :", self.min_cluster_size_var, 1, 50)
+        self.tfidf_max_features_spin = spin(5, 0, "Vocabulaire TF-IDF maximal :", self.tfidf_max_features_var, 100, 50000, 100)
+        self.tfidf_ngram_max_spin = spin(5, 1, "Taille max des n-grammes :", self.tfidf_ngram_max_var, 1, 4)
 
-        ttk.Label(
-            frame,
-            text="Ces valeurs s'appliquent uniquement à cet entraînement — les valeurs par défaut de "
-            "l'application (onglet Paramètres) ne sont pas modifiées.",
-            foreground="#555", wraplength=720, justify="left",
-        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            frame, text="Noms de catégorie plus naturels (KeyBERT)", variable=self.use_keybert_var,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Checkbutton(
+            frame, text="Détecter les documents en double", variable=self.detect_duplicates_var,
+        ).grid(row=6, column=2, columnspan=2, sticky="w", pady=(10, 0))
+
+        return row
+
+    def _show_engine_help(self) -> None:
+        EngineHelpDialog(self)
 
     def _apply_preset(self, _event=None) -> None:
         name = self.preset_var.get()
         match = next((p for p in TRAINING_PRESETS if p[0] == name), None)
         if match is None:
             return
-        description, values = match[1], match[2]
-        self.preset_description_var.set(description)
+        values = match[2]
 
         config = get_config()
         self.engine.set(values.get("engine", ENGINE_TFIDF))
@@ -753,7 +1212,6 @@ class TrainTab(ttk.Frame):
         self.tfidf_ngram_max_var.set(values.get("tfidf_ngram_max", config.tfidf_ngram_max))
 
         self._on_engine_change()
-        self._update_embedding_description()
 
     def _choose_input_dir(self) -> None:
         directory = filedialog.askdirectory(title="Dossier de documents")
@@ -789,6 +1247,13 @@ class TrainTab(ttk.Frame):
         if not input_dir or not model_name:
             messagebox.showwarning("Champs manquants", "Choisissez le dossier de documents et le nom du modèle.")
             return
+        extensions = self._selected_extensions()
+        if not extensions:
+            messagebox.showwarning(
+                "Aucun type de fichier sélectionné",
+                "Cochez au moins un type de fichier à inclure dans l'entraînement.",
+            )
+            return
         model_path = model_store.model_path_for_name(model_name)
 
         self.train_button.configure(state="disabled")
@@ -808,6 +1273,10 @@ class TrainTab(ttk.Frame):
             "min_cluster_size": self.min_cluster_size_var.get(),
             "tfidf_max_features": self.tfidf_max_features_var.get(),
             "tfidf_ngram_max": self.tfidf_ngram_max_var.get(),
+            "extensions": extensions,
+            "recursive": self.recursive_var.get(),
+            "use_keybert": self.use_keybert_var.get(),
+            "detect_duplicates": self.detect_duplicates_var.get(),
         }
         threading.Thread(
             target=self._run_training,
@@ -835,6 +1304,7 @@ class TrainTab(ttk.Frame):
             self.after(0, self._enable_open_folder, model_path)
             if self.on_model_created:
                 self.after(0, self.on_model_created, model_path)
+            self.after(0, self._check_training_duplicates, model_path)
         except Exception as exc:
             self.after(0, self._log_line, f"\nErreur : {exc}")
         finally:
@@ -851,6 +1321,45 @@ class TrainTab(ttk.Frame):
         dataset_dir = model_store.model_dataset_dir(self.last_model_path)
         if os.path.isdir(dataset_dir):
             os.startfile(dataset_dir)
+
+    def _check_training_duplicates(self, model_path: str) -> None:
+        """Propose de déplacer les documents en double vers un dossier
+        _backup si l'entraînement en a détecté (voir la case "Détecter les
+        documents en double" dans les paramètres avancés)."""
+        digest_path = model_store.model_digest_path(model_path)
+        if not os.path.exists(digest_path):
+            return
+        try:
+            with open(digest_path, encoding="utf-8") as f:
+                digest = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return
+        pairs = digest.get("duplicates") or []
+        if not pairs:
+            return
+        DuplicatesDialog(
+            self, pairs, on_confirm=lambda: self._delete_training_duplicates(digest_path),
+            note=(
+                "Un exemplaire de chaque groupe de doublons est gardé. Les documents d'origine ne "
+                "sont jamais touchés : seule leur COPIE dans le dossier du modèle (dataset/) est "
+                "déplacée vers un sous-dossier « _backup » — jamais supprimée définitivement, "
+                "toujours récupérable au besoin."
+            ),
+        )
+
+    def _delete_training_duplicates(self, digest_path: str) -> None:
+        def task() -> None:
+            moved = delete_training_duplicates_fn(digest_path, progress=lambda m: self.after(0, self._log_line, m))
+            if moved:
+                self.after(
+                    0, lambda: messagebox.showinfo(
+                        "Doublons déplacés",
+                        f"{len(moved)} document(s) déplacé(s) vers un dossier « _backup » à côté de "
+                        "leur dossier d'origine.",
+                    )
+                )
+
+        threading.Thread(target=task, daemon=True).start()
 
 
 # ── Onglet Automatisation ─────────────────────────────────────────
@@ -1089,7 +1598,7 @@ class TransformTab(ttk.Frame):
         self.dataset_dir: str | None = None
         self.bundle: dict | None = None
         self.discovered_models: list[tuple[str, int]] = []
-        self.selected_cluster_id: int | None = None
+        self.selected_name: str | None = None
         self._build()
         self._refresh_model_picker()
 
@@ -1237,12 +1746,31 @@ class TransformTab(ttk.Frame):
         cluster_names = self.bundle["cluster_names"]
         original_names = self.bundle.get("original_cluster_names", {})
         has_dataset = bool(self.dataset_dir and os.path.isdir(self.dataset_dir))
-        for cluster_id, name in sorted(cluster_names.items()):
+
+        # Plusieurs identifiants de cluster internes peuvent partager le même
+        # nom affiché (ex. après plusieurs améliorations successives, ou un
+        # renommage manuel qui rapproche deux clusters) : regrouper par nom
+        # pour que chaque catégorie n'apparaisse qu'une seule fois. Les noms
+        # "détectés" d'origine, potentiellement différents entre clusters
+        # fusionnés, sont listés ensemble pour rester transparent.
+        by_name: dict[str, list[int]] = {}
+        for cluster_id, name in cluster_names.items():
+            by_name.setdefault(name, []).append(cluster_id)
+        # Une catégorie confirmée à la main (onglet Classification) peut ne
+        # correspondre à AUCUN cluster K-Means (le clustering reste
+        # non supervisé) : sans cette ligne, ses documents existeraient bien
+        # dans dataset/ mais la catégorie n'apparaîtrait jamais ici.
+        for name in self.bundle.get("confirmed_overrides", {}).values():
+            by_name.setdefault(name, [])
+
+        for name in sorted(by_name):
+            cluster_ids = by_name[name]
+            detected = sorted({original_names.get(cid, "n/a") for cid in cluster_ids})
+            detected_display = " / ".join(detected) if detected else "(confirmée manuellement)"
             count = len(list_category_files(self.dataset_dir, name)) if has_dataset else None
-            detected_name = original_names.get(cluster_id, "n/a")
             self.tree.insert(
-                "", "end", iid=str(cluster_id),
-                values=(name, detected_name, count if count is not None else "n/a"),
+                "", "end", iid=name,
+                values=(name, detected_display, count if count is not None else "n/a"),
             )
 
         dataset_note = (
@@ -1250,11 +1778,11 @@ class TransformTab(ttk.Frame):
             if has_dataset
             else " (dossier dataset pas encore créé — entraînez ou améliorez ce modèle une première fois)"
         )
-        self.status.set(f"{len(cluster_names)} catégorie(s){dataset_note}.")
+        self.status.set(f"{len(by_name)} catégorie(s){dataset_note}.")
         self._clear_selection_ui()
 
     def _clear_selection_ui(self) -> None:
-        self.selected_cluster_id = None
+        self.selected_name = None
         self.rename_var.set("")
         self.rename_entry.configure(state="disabled")
         self.rename_button.configure(state="disabled")
@@ -1264,9 +1792,7 @@ class TransformTab(ttk.Frame):
         self.delete_button.configure(state="disabled")
 
     def _selected_name(self) -> str | None:
-        if self.selected_cluster_id is None or not self.bundle:
-            return None
-        return self.bundle["cluster_names"].get(self.selected_cluster_id)
+        return self.selected_name
 
     def _on_select_category(self, _event=None) -> None:
         selection = self.tree.selection()
@@ -1274,9 +1800,8 @@ class TransformTab(ttk.Frame):
             self._clear_selection_ui()
             return
 
-        cluster_id = int(selection[0])
-        self.selected_cluster_id = cluster_id
-        name = self.bundle["cluster_names"][cluster_id]
+        name = selection[0]
+        self.selected_name = name
 
         self.rename_var.set(name)
         self.rename_entry.configure(state="normal")
@@ -1291,7 +1816,8 @@ class TransformTab(ttk.Frame):
         self.prefix_button.configure(state="normal" if has_dataset else "disabled")
 
         other_name = get_config().other_category_name
-        can_delete = len(self.bundle["cluster_names"]) > 1 and name != other_name
+        all_names = set(self.bundle["cluster_names"].values()) | set(self.bundle.get("confirmed_overrides", {}).values())
+        can_delete = len(all_names) > 1 and name != other_name
         self.delete_button.configure(state="normal" if can_delete else "disabled")
 
     # ── Actions ──
@@ -1616,6 +2142,14 @@ class SettingsTab(ttk.Frame):
             clustering, 4, "cluster_min_cluster_size",
             "Documents minimum par catégorie pour qu'un découpage soit retenu :",
         )
+        self._add_bool_field(
+            clustering, 5, "cluster_use_keybert",
+            "Noms de catégorie plus naturels via KeyBERT (repli TF-IDF si non installé)",
+        )
+        self._add_bool_field(
+            clustering, 6, "cluster_detect_duplicates",
+            "Détecter les documents en double pendant l'entraînement",
+        )
         ttk.Label(
             clustering,
             text="Aucune autre limite n'est appliquée dans le code : augmentez le maximum "
@@ -1625,7 +2159,7 @@ class SettingsTab(ttk.Frame):
             "garde tous les documents dans une seule catégorie (utile pour un dossier qui ne "
             "contient en réalité qu'un seul type de document).",
             foreground="#555", wraplength=320, justify="left",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         vectorization = ttk.LabelFrame(container, text="Vectorisation", padding=10)
         vectorization.grid(row=0, column=1, sticky="nsew", pady=(0, 10))

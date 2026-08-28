@@ -2,3 +2,9 @@
 # Télécharge un modèle (~90 Mo) depuis Hugging Face au tout premier lancement,
 # puis fonctionne hors-ligne (modèle mis en cache localement).
 sentence-transformers>=3.0.0
+
+# Optionnel : active le nommage des catégories via KeyBERT (onglet
+# Entraînement, coché par défaut) — réutilise le modèle d'embeddings
+# ci-dessus (all-MiniLM-L6-v2), aucun téléchargement supplémentaire. Sans ce
+# paquet, l'entraînement se replie automatiquement sur le nommage TF-IDF.
+keybert>=0.8.0

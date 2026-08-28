@@ -1,8 +1,20 @@
 .venv
 liste_pdf
-storage
+storage/dataset
+storage/models/*
+!storage/models/_preload
 
 # Générés par l'outil (contiennent des chemins propres à la machine)
 automations.json
 config.json
 *_classification.json
+
+# Compilation en exécutable (PyInstaller — voir build.ps1 / build.sh) : gros
+# artefacts binaires, jamais versionnés. Dossiers de sortie séparés par
+# plateforme (build-windows/, build-linux/) : pas de compilation croisée, ne
+# jamais écrire dans le même dossier depuis deux plateformes en même temps.
+build-windows/
+build-linux/
+build_log*.txt
+
+__pycache__
