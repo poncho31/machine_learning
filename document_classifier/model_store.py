@@ -19,6 +19,7 @@ et `restore_snapshot`.
 """
 from __future__ import annotations
 
+import json
 import os
 import pickle
 import re
@@ -27,6 +28,7 @@ import tempfile
 from datetime import datetime
 
 from .config import get_config
+from .utils import write_json_atomic
 
 _UNSAFE_NAME_CHARS = re.compile(r'[<>:"/\\|?*]')
 _HISTORY_DIR_NAMES = ("pkl_history", "json_history", "dataset_history")
@@ -58,13 +60,35 @@ def model_manifest_path(model_path: str) -> str:
     return os.path.join(directory, f"{stem}.json")
 
 
+def load_manifest(model_path: str) -> dict:
+    """Charge le manifeste (`<nom>.json`) d'un modèle — un dict vide si le
+    fichier n'existe pas encore (modèle tout juste créé, ou jamais
+    synchronisé) ou est illisible (JSON corrompu, erreur disque), plutôt que
+    de lever : cette même garde était auparavant recopiée telle quelle dans
+    plus d'une dizaine d'endroits (discover.py, rename.py, gui.py) à chaque
+    fois qu'un appelant avait besoin de lire ce fichier."""
+    manifest_path = model_manifest_path(model_path)
+    if not os.path.exists(manifest_path):
+        return {}
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_manifest(manifest: dict, model_path: str) -> None:
+    write_json_atomic(manifest, model_manifest_path(model_path))
+
+
 def model_digest_path(model_path: str) -> str:
-    """Résumé condensé du corpus d'entraînement de ce modèle (extrait +
-    mots-clés par document, PAS le texte intégral — voir
-    `discover._write_corpus_digest`), à côté du .pkl (même nom, suffixe
-    `_digest.json`). Pensé pour être relu par un futur modèle d'IA local
-    (proposer un nom de catégorie, résumer un fichier) sans avoir à
-    ré-extraire les documents d'origine."""
+    """Emplacement de l'ANCIEN résumé de corpus séparé (`_digest.json`),
+    d'avant son unification dans `<nom>.json` (voir `model_manifest_path`,
+    `discover._write_corpus_digest`) : un seul fichier fait désormais
+    référence pour un modèle donné (catégories, doublons, résumé par
+    document), plutôt que deux qui pouvaient se désynchroniser. Cette
+    fonction n'est plus utilisée que pour repérer et supprimer un éventuel
+    `_digest.json` laissé par une version antérieure de l'application."""
     directory = os.path.dirname(os.path.abspath(model_path)) or "."
     stem = os.path.splitext(os.path.basename(model_path))[0]
     return os.path.join(directory, f"{stem}_digest.json")
@@ -184,6 +208,36 @@ def restore_snapshot(model_path: str, timestamp: str) -> None:
         shutil.rmtree(dataset_dir)
     if os.path.isdir(dataset_snapshot):
         shutil.copytree(dataset_snapshot, dataset_dir)
+
+
+def delete_model_permanently(model_path: str) -> None:
+    """Supprime DÉFINITIVEMENT ce modèle : le `.pkl`, son `.json`, son
+    dossier `dataset/`, et tout son historique (pkl_history/json_history/
+    dataset_history) — AUCUN instantané n'est pris avant (il n'y aurait nulle
+    part où le restaurer une fois ces fichiers eux-mêmes supprimés).
+
+    Ne supprime QUE ces chemins précis, jamais tout le dossier qui les
+    contient : un modèle créé via "Parcourir..." plutôt que par le nom
+    standard (voir `model_path_for_name`) peut très bien partager son
+    dossier avec des fichiers sans rapport (ex. le Bureau de l'utilisateur)
+    — les y laisser intacts est le seul comportement sûr. Ne touche jamais
+    aux documents SOURCE : `dataset/` n'en est qu'une copie."""
+    if os.path.exists(model_path):
+        os.remove(model_path)
+    manifest_path = model_manifest_path(model_path)
+    if os.path.exists(manifest_path):
+        os.remove(manifest_path)
+    legacy_digest = model_digest_path(model_path)
+    if os.path.exists(legacy_digest):
+        os.remove(legacy_digest)
+    dataset_dir = model_dataset_dir(model_path)
+    if os.path.isdir(dataset_dir):
+        shutil.rmtree(dataset_dir, ignore_errors=True)
+    model_dir = _model_dir(model_path)
+    for name in _HISTORY_DIR_NAMES:
+        path = os.path.join(model_dir, name)
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def save_bundle(bundle: dict, path: str) -> None:

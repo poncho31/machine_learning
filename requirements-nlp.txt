@@ -1,0 +1,6 @@
+# Optionnel : active la racinisation (stemming) français/anglais avant la
+# vectorisation TF-IDF (onglet Entraînement, case "Racinisation des mots"),
+# pour rapprocher les variantes d'un même mot ("facture"/"factures"/"facturé").
+# Pur Python, aucune dépendance lourde, aucun téléchargement. Sans ce paquet,
+# l'entraînement se replie automatiquement sur les mots tels quels.
+snowballstemmer>=2.2.0

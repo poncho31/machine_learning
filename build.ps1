@@ -56,4 +56,4 @@ if ($Onefile) {
 }
 
 Write-Host "Compilation ($Variant, $(if ($Onefile) {'onefile'} else {'onedir'})) avec PyInstaller..."
-python -m PyInstaller @commonArgs ml_pdf_gui.py
+python -m PyInstaller @commonArgs classeur_documents_gui.py

@@ -57,4 +57,4 @@ else
 fi
 
 echo "Compilation ($VARIANT, $([ "$ONEFILE" -eq 1 ] && echo onefile || echo onedir)) avec PyInstaller..."
-python3 -m PyInstaller "${COMMON_ARGS[@]}" ml_pdf_gui.py
+python3 -m PyInstaller "${COMMON_ARGS[@]}" classeur_documents_gui.py

@@ -1,8 +1,8 @@
-"""Point d'entrée de l'interface graphique de classement de PDF.
+"""Point d'entrée de l'interface graphique du classeur de documents.
 
-    python ml_pdf_gui.py
+    python classeur_documents_gui.py
 """
-from pdf_classifier.gui import main
+from document_classifier.gui import main
 
 if __name__ == "__main__":
     main()

@@ -21,7 +21,16 @@ def _extract_pdf(path: str) -> str:
     import pymupdf
 
     with pymupdf.open(path) as doc:
-        return " ".join(page.get_text() for page in doc)
+        text = " ".join(page.get_text() for page in doc)
+    # Un PDF scanné (image du document, sans couche texte) donne une chaîne
+    # vide ou uniquement des espaces ici — sans quoi il resterait
+    # "illisible" (voir discover._build_bundle) alors que l'OCR (si activé,
+    # config `ocr_enabled`) peut justement en tirer du texte exploitable.
+    # Tenté seulement en dernier recours : l'extraction normale est
+    # nettement plus rapide et déjà fiable pour un PDF avec texte natif.
+    if not text.strip() and _ocr_config().ocr_enabled:
+        return _extract_pdf_ocr(path)
+    return text
 
 
 def _extract_plain_text(path: str) -> str:
@@ -138,6 +147,93 @@ def _extract_pptx(path: str) -> str:
     return "\n".join(parts)
 
 
+def _extract_odf(path: str) -> str:
+    try:
+        from odf import teletype
+        from odf.opendocument import load
+    except ImportError as exc:
+        raise RuntimeError(
+            "La lecture des fichiers OpenDocument (.odt/.ods/.odp) nécessite le paquet "
+            "optionnel odfpy : pip install -r requirements-office.txt"
+        ) from exc
+    # `.body` est le point d'entrée générique du contenu quel que soit le
+    # type de document (texte, tableur, présentation...) — plus fiable que de
+    # distinguer chaque type par sa propre structure interne.
+    document = load(path)
+    return teletype.extractText(document.body)
+
+
+def _ocr_config():
+    from .config import get_config
+
+    return get_config()
+
+
+def _ocr_image(image) -> str:
+    """OCR d'une image déjà chargée (objet PIL) via Tesseract — utilisé aussi
+    bien pour un fichier image direct que pour une page de PDF scannée
+    rasterisée (voir `_extract_pdf`). Le paquet Python `pytesseract` est
+    installé par défaut (`requirements.txt`) ; seul le moteur Tesseract
+    lui-même (binaire externe, pas un paquet pip) reste à installer
+    séparément sur la machine — l'`ImportError` reste gérée ici en filet de
+    sécurité (ex. installation manuelle sans ce paquet), mais ne devrait
+    normalement jamais se produire. Lève `RuntimeError` avec un message
+    clair si Tesseract est absent, plutôt que de laisser remonter une
+    `TesseractNotFoundError` peu compréhensible."""
+    try:
+        import pytesseract
+    except ImportError as exc:
+        raise RuntimeError(
+            "L'OCR nécessite le paquet pytesseract (normalement déjà installé par "
+            "requirements.txt) : pip install pytesseract"
+        ) from exc
+    config = _ocr_config()
+    if config.tesseract_cmd_path:
+        pytesseract.pytesseract.tesseract_cmd = config.tesseract_cmd_path
+    try:
+        return pytesseract.image_to_string(image, lang="fra+eng")
+    except pytesseract.TesseractNotFoundError as exc:
+        raise RuntimeError(
+            "L'OCR nécessite aussi le moteur Tesseract installé sur la machine (pas un "
+            "paquet Python, un exécutable à part) — voir la section \"Formats de fichiers "
+            "pris en charge\" du README pour les liens d'installation, ou précisez son "
+            "chemin dans l'onglet Paramètres."
+        ) from exc
+
+
+def _extract_image(path: str) -> str:
+    if not _ocr_config().ocr_enabled:
+        raise RuntimeError(
+            "La lecture des images nécessite l'OCR — activez-le dans l'onglet Paramètres "
+            "(voir la config `ocr_enabled`)."
+        )
+    from PIL import Image
+
+    with Image.open(path) as image:
+        return _ocr_image(image)
+
+
+def _extract_pdf_ocr(path: str) -> str:
+    """Repli OCR pour un PDF scanné (sans couche texte) : rasterise chaque
+    page (pymupdf, déjà une dépendance de base) puis reconnaît le texte page
+    par page. Nettement plus lent que `_extract_pdf` — seulement tenté quand
+    l'extraction normale n'a rien donné (voir `_extract_pdf`) et que l'OCR
+    est activé (config `ocr_enabled`)."""
+    import pymupdf
+    from PIL import Image
+
+    parts = []
+    with pymupdf.open(path) as doc:
+        for page in doc:
+            # 200 DPI : compromis lisibilité/vitesse pour un scan de document
+            # bureautique typique (la résolution par défaut, 72 DPI, est trop
+            # basse pour une reconnaissance fiable des petits caractères).
+            pixmap = page.get_pixmap(dpi=200)
+            image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+            parts.append(_ocr_image(image))
+    return "\n".join(parts)
+
+
 def _extract_msg(path: str) -> str:
     try:
         import extract_msg
@@ -146,8 +242,32 @@ def _extract_msg(path: str) -> str:
             "La lecture des fichiers .msg (Outlook) nécessite le paquet optionnel extract-msg : "
             "pip install -r requirements-msg.txt"
         ) from exc
-    message = extract_msg.Message(path)
-    return "\n".join(part for part in (message.subject, message.body) if part)
+    # `Message` garde le fichier .msg ouvert (accès OLE via olefile) tant
+    # qu'il n'est pas fermé explicitement : sans le context manager, le
+    # handle restait ouvert jusqu'au passage du ramasse-miettes, ce qui
+    # pouvait faire échouer une opération ultérieure sur ce même fichier sous
+    # Windows (copie dans dataset/, export vers le dossier de sortie...) —
+    # le fichier semblait alors "verrouillé" par l'outil lui-même.
+    with extract_msg.Message(path) as message:
+        # `body` se replie déjà tout seul sur le corps RTF/HTML dé-encapsulé
+        # si le message n'a pas de corps texte brut (voir extract_msg) ;
+        # `sender` complète le sujet et le corps pour l'aperçu et la
+        # catégorisation, comme le ferait un lecteur d'e-mails.
+        #
+        # Chaque champ est lu isolément : la désencapsulation RTF (utilisée
+        # par `body` quand il n'y a pas de flux texte brut) est un point de
+        # fragilité connu de la bibliothèque sur certains messages malformés
+        # — un champ qui échoue ne doit pas priver l'extraction des autres,
+        # encore exploitables, et faire perdre TOUT le texte du message.
+        parts = []
+        for attr in ("subject", "sender", "body"):
+            try:
+                value = getattr(message, attr)
+            except Exception:
+                value = None
+            if value:
+                parts.append(value)
+        return "\n".join(parts)
 
 
 # Extension (minuscule, avec le point) -> fonction d'extraction(path) -> texte.
@@ -179,9 +299,27 @@ EXTRACTORS = {
     ".xlsx": _extract_xlsx,
     ".xlsm": _extract_xlsx,
     ".pptx": _extract_pptx,
+    # OpenDocument (LibreOffice/OpenOffice)
+    ".odt": _extract_odf,
+    ".ods": _extract_odf,
+    ".odp": _extract_odf,
+    # Images (OCR requis, voir config `ocr_enabled` — non activé par défaut,
+    # échoue sinon avec un message clair plutôt que de laisser un fichier
+    # image se retrouver silencieusement sans texte)
+    ".png": _extract_image,
+    ".jpg": _extract_image,
+    ".jpeg": _extract_image,
+    ".tiff": _extract_image,
+    ".bmp": _extract_image,
 }
 
 SUPPORTED_EXTENSIONS = tuple(sorted(EXTRACTORS))
+
+# Sous-ensemble d'extensions image de EXTRACTORS ci-dessus — réutilisé par
+# `discover._build_bundle` pour le moteur "image" (analyse visuelle par
+# CLIP), qui ne doit considérer QUE des fichiers image, pas n'importe quel
+# format pris en charge en général.
+IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".tiff", ".bmp"})
 
 
 def is_supported(path: str) -> bool:

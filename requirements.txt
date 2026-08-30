@@ -3,3 +3,13 @@
 pymupdf>=1.24.0
 scikit-learn>=1.5.0
 numpy>=1.26.0
+
+# Obligatoire : reconnaissance de caractères (OCR) pour les PDF scannés et
+# les images (.png/.jpg/.jpeg/.tiff/.bmp) — installe aussi Pillow (sa propre
+# dépendance). Désactivé par défaut (config `ocr_enabled`, onglet
+# Paramètres) : ce paquet Python ne suffit PAS à lui seul, il pilote le
+# moteur Tesseract, qui doit lui être installé séparément sur la machine
+# (ce n'est pas un paquet pip) — voir la section "Formats de fichiers pris
+# en charge" du README pour les liens d'installation. Sans Tesseract
+# installé, l'OCR reste simplement indisponible, avec un message clair.
+pytesseract>=0.3.10

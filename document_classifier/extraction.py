@@ -7,8 +7,10 @@ que d'interrompre le traitement d'un lot entier de fichiers.
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
+from .config import get_config
 from .formats import SUPPORTED_EXTENSIONS, extract_text_for
 
 # Dossiers de bookkeeping interne à ne jamais reprendre comme documents
@@ -92,6 +94,7 @@ def extract_documents(
     recursive: bool = False,
     progress=None,
     extensions: tuple[str, ...] = SUPPORTED_EXTENSIONS,
+    parallel_workers: int | None = None,
 ) -> list[ExtractedDocument]:
     """`progress`, si fourni, reçoit un message avant le début de
     l'extraction puis à intervalles réguliers pendant qu'elle avance — utile
@@ -100,19 +103,44 @@ def extract_documents(
 
     `extensions` restreint les fichiers pris en compte (voir l'onglet
     Entraînement, sélection des types de fichiers à inclure) : par défaut
-    tous les formats pris en charge."""
+    tous les formats pris en charge.
+
+    `parallel_workers` extrait plusieurs fichiers à la fois avec des threads
+    (défaut : config `extraction_parallel_workers`) — l'extraction délègue
+    l'essentiel du travail à des bibliothèques C qui relâchent le GIL
+    (pymupdf...) ou attend simplement des lectures disque, ce qui profite
+    donc réellement du parallélisme malgré le GIL. `executor.map` restitue
+    les résultats dans l'ORDRE DE `paths`, pas dans l'ordre de complétion :
+    l'ordre de `documents` (dont dépendent `labels`/`vectors` en aval, voir
+    `discover._build_bundle`) reste donc identique, quel que soit le nombre
+    de threads. 1 désactive le parallélisme (utile pour un diagnostic)."""
     paths = list_documents(directory, recursive=recursive, extensions=extensions)
     total = len(paths)
     if progress and total:
         progress(f"Extraction du texte de {total} document(s)...")
 
+    resolved_workers = parallel_workers if parallel_workers is not None else get_config().extraction_parallel_workers
+    resolved_workers = max(1, min(resolved_workers, total)) if total else 1
+
     step = max(1, total // 20) if total > 30 else 1
     documents = []
-    for i, path in enumerate(paths, start=1):
+
+    def _extract_one(path: str) -> ExtractedDocument:
         text, error = extract_text(path)
-        documents.append(
-            ExtractedDocument(path=path, filename=os.path.basename(path), text=text, error=error)
-        )
-        if progress and (i % step == 0 or i == total):
-            progress(f"  {i}/{total} document(s) analysé(s)...")
+        return ExtractedDocument(path=path, filename=os.path.basename(path), text=text, error=error)
+
+    if resolved_workers <= 1:
+        results_iter = (_extract_one(path) for path in paths)
+    else:
+        executor = ThreadPoolExecutor(max_workers=resolved_workers)
+        results_iter = executor.map(_extract_one, paths)
+
+    try:
+        for i, doc in enumerate(results_iter, start=1):
+            documents.append(doc)
+            if progress and (i % step == 0 or i == total):
+                progress(f"  {i}/{total} document(s) analysé(s)...")
+    finally:
+        if resolved_workers > 1:
+            executor.shutdown()
     return documents

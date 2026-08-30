@@ -1,5 +1,6 @@
 .venv
 liste_pdf
+storage/classified
 storage/dataset
 storage/models/*
 !storage/models/_preload

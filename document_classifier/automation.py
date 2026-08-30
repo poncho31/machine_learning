@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 
 from .classify import (
@@ -63,6 +63,7 @@ class AutomationJob:
         self.on_event = on_event
         self.bundle = None
         self.engine = None
+        self._model_mtime: float | None = None
         self.last_run: str | None = None
         self.last_run_count = 0
         self.last_error: str | None = None
@@ -77,7 +78,7 @@ class AutomationJob:
     def start(self) -> None:
         if self.running:
             return
-        self.bundle, self.engine = load_model_for_prediction(self.config.model_path)
+        self._load_model()
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -87,9 +88,34 @@ class AutomationJob:
         self._stop_event.set()
         self.on_event(f"[{self.config.name}] Arrêtée.")
 
+    def _load_model(self) -> None:
+        self.bundle, self.engine = load_model_for_prediction(self.config.model_path)
+        try:
+            self._model_mtime = os.path.getmtime(self.config.model_path)
+        except OSError:
+            self._model_mtime = None
+
+    def _reload_model_if_changed(self) -> None:
+        """Recharge le modèle si son .pkl a changé sur disque depuis le
+        dernier chargement (amélioration, ré-entraînement, renommage de
+        catégorie... depuis la GUI ou l'API, pendant que cette automatisation
+        tourne). Sans ça, une automatisation démarrée une fois pour toutes
+        gardait en mémoire le bundle chargé au démarrage — catégories,
+        `confirmed_overrides` — indéfiniment, jusqu'à un arrêt/redémarrage
+        manuel, même si le modèle avait entre-temps été amélioré."""
+        try:
+            current_mtime = os.path.getmtime(self.config.model_path)
+        except OSError:
+            return  # fichier temporairement inaccessible : on garde le bundle déjà chargé
+        if self._model_mtime is not None and current_mtime == self._model_mtime:
+            return
+        self._load_model()
+        self.on_event(f"[{self.config.name}] Modèle rechargé (modifié depuis le dernier passage).")
+
     def _loop(self) -> None:
         while not self._stop_event.is_set():
             try:
+                self._reload_model_if_changed()
                 self._run_once()
             except Exception as exc:
                 self.last_error = str(exc)
@@ -151,14 +177,38 @@ class AutomationManager:
         self.jobs: dict[str, AutomationJob] = {}
 
     def load(self) -> None:
+        """Charge `automations.json`. Volontairement tolérant, ligne par
+        ligne : ce fichier n'est pas versionné (voir .gitignore) et peut avoir
+        été modifié à la main, ou daté d'une version antérieure de l'outil
+        dont le schéma a changé depuis. Sans cette tolérance, une seule
+        automatisation mal formée (champ inconnu, champ requis manquant...)
+        levait une exception dès la construction de `AutomationTab` — ce qui
+        empêchait le lancement de L'APPLICATION ENTIÈRE, pas seulement de
+        l'onglet Automatisation."""
         if not os.path.exists(self.config_path):
             return
         import json
 
-        with open(self.config_path, encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(self.config_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            self.on_event(f"⚠ Impossible de lire {self.config_path} : {exc}")
+            return
+
+        known_fields = {f.name for f in fields(AutomationConfig)}
         for item in data:
-            config = AutomationConfig(**item)
+            name = item.get("name", "?") if isinstance(item, dict) else "?"
+            try:
+                # Ignore les champs inconnus plutôt que de lever une erreur
+                # (même tolérance que `config.load_config` pour config.json) :
+                # une automatisation créée par une version future de l'outil,
+                # avec un champ supplémentaire, doit rester chargeable.
+                filtered = {key: value for key, value in item.items() if key in known_fields}
+                config = AutomationConfig(**filtered)
+            except Exception as exc:
+                self.on_event(f"⚠ Automatisation {name!r} ignorée (configuration invalide) : {exc}")
+                continue
             job = AutomationJob(config, on_event=self.on_event)
             self.jobs[config.name] = job
             if config.enabled:

@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 from . import model_store
 from .classify import classify as classify_fn
+from .classify import known_categories
 from .discover import build_model as build_model_fn
 from .discover import improve_model as improve_model_fn
 from .extraction import extract_documents_from_paths
@@ -75,7 +76,7 @@ def _resolve_model_path(name: str) -> str:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    server_version = "PDFClassifierAPI/1.0"
+    server_version = "DocumentClassifierAPI/1.0"
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002 (signature imposée par BaseHTTPRequestHandler)
         on_event = getattr(self.server, "on_event", None)
@@ -230,7 +231,7 @@ class _Handler(BaseHTTPRequestHandler):
             {
                 "model_name": model_name,
                 "model_path": model_path,
-                "categories": list(bundle["cluster_names"].values()),
+                "categories": known_categories(bundle),
                 "n_documents_trained": bundle.get("n_documents_trained"),
                 "log": log,
             },
@@ -271,9 +272,14 @@ class _Handler(BaseHTTPRequestHandler):
 
         log: list[str] = []
         bundle = improve_model_fn(model_path, documents, confirmed_labels, progress=log.append)
-        self._send_json(200, {"categories": list(bundle["cluster_names"].values()), "log": log})
+        # `known_categories`, PAS `bundle["cluster_names"]` en direct :
+        # `improve_model` accepte n'importe quel mode de modèle (supervisé ou
+        # non), et un modèle supervisé n'a pas de clé "cluster_names" — y
+        # accéder directement ferait échouer la réponse (KeyError -> 500)
+        # alors même que l'amélioration a réussi.
+        self._send_json(200, {"categories": known_categories(bundle), "log": log})
 
-    # ── Transformer les données ──
+    # ── Catégories du modèle ──
     def _handle_rename(self) -> None:
         body = self._read_json_body()
         model_name = body.get("model_name")
@@ -282,7 +288,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise ValueError("Les champs 'model_name' et 'renames' sont requis.")
         model_path = _resolve_model_path(model_name)
         bundle = rename_categories(model_path, renames)
-        self._send_json(200, {"categories": list(bundle["cluster_names"].values())})
+        self._send_json(200, {"categories": known_categories(bundle)})
 
     def _handle_delete_category(self) -> None:
         body = self._read_json_body()
@@ -292,7 +298,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise ValueError("Les champs 'model_name' et 'category' sont requis.")
         model_path = _resolve_model_path(model_name)
         bundle = delete_category(model_path, category, other_name=body.get("other_name"))
-        self._send_json(200, {"categories": list(bundle["cluster_names"].values())})
+        self._send_json(200, {"categories": known_categories(bundle)})
 
 
 class ApiServer:

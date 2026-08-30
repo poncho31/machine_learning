@@ -1,13 +1,13 @@
-"""Point d'entrée CLI de l'outil de catégorisation de PDF.
+"""Point d'entrée CLI de l'outil de catégorisation de documents.
 
-Voir pdf_classifier/cli.py pour le détail des sous-commandes.
+Voir document_classifier/cli.py pour le détail des sous-commandes.
 
 Exemples :
-    python ml_pdf.py discover --input ./liste_pdf --output ./classified
-    python ml_pdf.py train --input ./mes_categories --model model.pkl
-    python ml_pdf.py classify --input ./nouveaux_pdf --model model.pkl --output ./classified
+    python classeur_documents.py discover --input ./mes_documents --output ./classified
+    python classeur_documents.py train --input ./mes_categories --model model.pkl
+    python classeur_documents.py classify --input ./nouveaux_documents --model model.pkl --output ./classified
 """
-from pdf_classifier.cli import main
+from document_classifier.cli import main
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -13,9 +13,6 @@
     # télécharge un modèle ~90 Mo au premier lancement)
     pip install -r requirements-embeddings.txt
 
-    # Optionnel : pour le vrai glisser-déposer dans l'interface graphique
-    pip install -r requirements-gui.txt
-
     # Optionnel : pour lire les fichiers .docx (Word)
     pip install -r requirements-docx.txt
 
@@ -25,16 +22,16 @@
 
 # Usage (ligne de commande)
     # Mode découverte : regrouper des documents non triés par similarité (sans exemples au préalable)
-    python ml_pdf.py discover --input ./liste_pdf --output ./classified
+    python classeur_documents.py discover --input ./mes_documents --output ./classified
 
     # Mode entraînement : apprendre un modèle à partir de documents déjà triés (1 sous-dossier = 1 catégorie)
-    python ml_pdf.py train --input ./mes_categories --model model.pkl
+    python classeur_documents.py train --input ./mes_categories --model model.pkl
 
     # Mode classification : appliquer un modèle déjà entraîné à de nouveaux documents
-    python ml_pdf.py classify --input ./nouveaux_fichiers --model model.pkl --output ./classified
+    python classeur_documents.py classify --input ./nouveaux_fichiers --model model.pkl --output ./classified
 
 # Usage (interface graphique, tout-en-un)
-    python ml_pdf_gui.py
+    python classeur_documents_gui.py
 
     # Onglet "Entraînement" (aucun tri manuel requis)
     #   1) Choisir un dossier de documents en vrac (les catégories sont détectées automatiquement)
@@ -43,9 +40,9 @@
     #   4) Choisir le nom du modèle à créer (.pkl), puis "Entraîner le modèle"
 
     # Onglet "Classification"
-    #   1) Charger un modèle (.pkl) déjà entraîné
-    #   2) Glisser des documents sur la fenêtre (ou "Ajouter des fichiers.../Ajouter un dossier...")
-    #   3) Corriger d'un double-clic les catégories mal proposées
+    #   1) Charger un modèle (.pkl) déjà entraîné (catégories détectées et fichiers du dataset visibles juste en dessous)
+    #   2) "Ajouter des fichiers.../Ajouter un dossier..."
+    #   3) Corriger d'un double-clic (ou "Attribuer une catégorie..." pour une sélection multiple) les catégories mal proposées
     #   4) "Valider et classer" pour ranger les fichiers dans le dossier de sortie
 
     # Onglet "Automatisation" (plusieurs automatisations en parallèle)

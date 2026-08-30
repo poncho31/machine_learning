@@ -1,5 +1,5 @@
-"""Mode entraînement : apprend un classifieur à partir de PDF déjà triés par
-l'utilisateur dans des sous-dossiers (chaque sous-dossier = une catégorie).
+"""Mode entraînement : apprend un classifieur à partir de documents déjà triés
+par l'utilisateur dans des sous-dossiers (chaque sous-dossier = une catégorie).
 
 C'est le cœur de l'usage visé : chaque utilisateur range un échantillon de ses
 propres documents dans des dossiers représentant ses catégories, puis entraîne
@@ -37,7 +37,7 @@ def train(
     if len(categories) < 2:
         raise ValueError(
             f"Il faut au moins 2 dossiers de catégories sous {labeled_dir} pour entraîner un modèle "
-            "(un sous-dossier par catégorie, contenant les PDF déjà triés de cette catégorie)."
+            "(un sous-dossier par catégorie, contenant les documents déjà triés de cette catégorie)."
         )
 
     texts: list[str] = []
@@ -70,7 +70,7 @@ def train(
         )
 
     if skipped:
-        progress(f"⚠ {len(skipped)} PDF ignoré(s) au total (texte illisible) :")
+        progress(f"⚠ {len(skipped)} document(s) ignoré(s) au total (texte illisible) :")
         for path in skipped:
             progress(f"    {path}")
 
